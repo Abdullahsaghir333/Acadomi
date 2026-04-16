@@ -1,4 +1,4 @@
-/** gTTS + focus endpoints on the Acadomi Python tutor service (see `python/services/tutor`). */
+/** edge-tts (Microsoft neural, default Christopher) + focus — Acadomi Python tutor service (`python/services/tutor`). */
 
 export function tutorPyBase(): string {
   return (process.env.TUTOR_SERVICE_URL?.trim() || "http://127.0.0.1:5002").replace(/\/$/, "");

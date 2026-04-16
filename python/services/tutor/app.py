@@ -1,22 +1,22 @@
 """
-Acadomi tutor microservice: gTTS narration + MediaPipe focus (called by Node only).
-Slides and Q&A use Gemini on the Express API.
+Acadomi tutor microservice: Edge TTS (Microsoft neural voices) + MediaPipe focus (called by Node only).
+Default voice: en-US-ChristopherNeural (male teaching tone). Slides and Q&A use Gemini on the Express API.
 """
 
 from __future__ import annotations
 
 import base64
 import os
+import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from io import BytesIO
 
 import cv2
+import edge_tts
 import numpy as np
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from gtts import gTTS
 from pydantic import BaseModel, Field
 
 from focus_tracker import FocusTracker, mediapipe_import_ok
@@ -24,6 +24,9 @@ from focus_tracker import FocusTracker, mediapipe_import_ok
 _here = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_here, ".env"))
 load_dotenv()
+
+# Microsoft Azure neural voice (free via edge-tts). Override with TUTOR_TTS_VOICE in .env.
+DEFAULT_TUTOR_TTS_VOICE = "en-US-ChristopherNeural"
 
 app = FastAPI(title="Acadomi Tutor Service", version="1.0.0")
 
@@ -108,23 +111,37 @@ def _focus_analyze_worker(key: str, raw: bytes) -> dict:
 @app.get("/health")
 def health() -> dict:
     ok, detail = mediapipe_import_ok()
+    voice = (os.environ.get("TUTOR_TTS_VOICE") or DEFAULT_TUTOR_TTS_VOICE).strip()
     return {
         "ok": True,
         "service": "acadomi-tutor",
         "port": int(os.environ.get("TUTOR_PORT", "5002")),
         "mediapipe": {"ok": ok, "detail": detail},
+        "tts": {"engine": "edge-tts", "voice": voice},
     }
 
 
 @app.post("/tts")
-def tts(body: TtsBody) -> dict:
+async def tts(body: TtsBody) -> dict:
     text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is empty")
+    voice = (os.environ.get("TUTOR_TTS_VOICE") or DEFAULT_TUTOR_TTS_VOICE).strip()
     try:
-        buf = BytesIO()
-        gTTS(text=text, lang="en", slow=False).write_to_fp(buf)
-        raw = buf.getvalue()
+        communicate = edge_tts.Communicate(text, voice)
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        try:
+            await communicate.save(path)
+            with open(path, "rb") as f:
+                raw = f.read()
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if not raw:
+            raise RuntimeError("edge-tts produced no audio")
         return {
             "mimeType": "audio/mpeg",
             "audioBase64": base64.b64encode(raw).decode("utf-8"),
