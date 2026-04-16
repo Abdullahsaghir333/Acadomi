@@ -11,7 +11,9 @@ import {
   GraduationCap,
   HelpCircle,
   Loader2,
+  Maximize2,
   Mic,
+  Minimize2,
   Plus,
   Play,
   ScanEye,
@@ -26,6 +28,11 @@ import {
 } from "lucide-react";
 
 import { MarketingHeader } from "@/components/marketing-header";
+import {
+  TutorLectureWhiteboard,
+  TutorQaWhiteboard,
+  type TutorLectureWhiteboardHandle,
+} from "@/components/tutor-whiteboard-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -228,6 +235,8 @@ export default function TutorPage() {
   const [narrationBulletIndex, setNarrationBulletIndex] = React.useState<number | null>(null);
   /** Which answer bullet tracks the spoken reply. */
   const [answerBulletIndex, setAnswerBulletIndex] = React.useState<number | null>(null);
+  /** Full-viewport teaching layout with the same controls as the lesson card. */
+  const [immersiveTeaching, setImmersiveTeaching] = React.useState(false);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -321,21 +330,26 @@ export default function TutorPage() {
   const answerResumeTimeRef = React.useRef(0);
   const lecturePointRefs = React.useRef<(HTMLLIElement | null)[]>([]);
   const qaBulletRefs = React.useRef<(HTMLLIElement | null)[]>([]);
-  const avatarListening = asking || questionSubmitting;
-  const avatarTeaching = tutorView === "lecture" && !avatarListening;
-  const avatarPaused = tutorView === "lecture" && !avatarListening && playingSlide === null;
-  const avatarMoodClass = avatarListening
-    ? "border-violet-400/60 bg-violet-500/10 shadow-[0_0_0_4px_rgba(139,92,246,0.15)]"
-    : avatarPaused
-      ? "border-amber-400/60 bg-amber-500/10 shadow-[0_0_0_4px_rgba(245,158,11,0.12)]"
-      : "border-primary/50 bg-primary/10 shadow-[0_0_0_4px_rgba(59,130,246,0.12)]";
-  const avatarFace = avatarListening ? "😮" : avatarPaused ? "🙂" : "😄";
-  const avatarLabel = avatarListening ? "Listening..." : avatarPaused ? "Paused" : "Teaching";
 
   const lastQaAnswerBullets = React.useMemo(
     () => (lastQa?.answer ? parseAnswerIntoBullets(lastQa.answer) : []),
     [lastQa?.answer],
   );
+
+  const lectureWhiteboardRef = React.useRef<TutorLectureWhiteboardHandle | null>(null);
+  /** When true, handwriting follows `narrationBulletIndex` without pausing audio. */
+  const lectureStepSyncActiveRef = React.useRef(false);
+  /** Avoid re-running handwriting for the same bullet index during one play. */
+  const lastHandwritingBulletRef = React.useRef<number | null>(null);
+
+  const qaAnswerWhiteboardRef = React.useRef<TutorLectureWhiteboardHandle | null>(null);
+  /** When true, Q&A answer handwriting follows `answerBulletIndex` (same timing as subtitle RAF). */
+  const answerStepSyncActiveRef = React.useRef(false);
+  const lastQaAnswerHandwritingRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    lastQaAnswerHandwritingRef.current = null;
+  }, [lastQa?.question, lastQa?.answer]);
 
   React.useEffect(() => {
     if (tutorView !== "lecture" || narrationBulletIndex == null) return;
@@ -424,6 +438,50 @@ export default function TutorPage() {
     },
     [cancelSubtitleRaf],
   );
+
+  React.useEffect(() => {
+    lectureStepSyncActiveRef.current = false;
+    lastHandwritingBulletRef.current = null;
+    lectureWhiteboardRef.current?.reset();
+  }, [slideIndex, activeSession?.id]);
+
+  React.useEffect(() => {
+    if (!immersiveTeaching) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setImmersiveTeaching(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [immersiveTeaching]);
+
+  /** Handwriting tracks the same segment index as the voice (subtitle RAF); audio never pauses for this. */
+  React.useEffect(() => {
+    if (!lectureStepSyncActiveRef.current) return;
+    if (tutorView !== "lecture") return;
+    if (playingSlide === null || activeSession === null) return;
+    if (playingSlide !== slideIndex) return;
+    const k = narrationBulletIndex;
+    if (k === null) return;
+    if (lastHandwritingBulletRef.current === k) return;
+    lastHandwritingBulletRef.current = k;
+    void lectureWhiteboardRef.current?.animateBullet(k);
+  }, [narrationBulletIndex, playingSlide, slideIndex, tutorView, activeSession?.id]);
+
+  React.useEffect(() => {
+    if (!answerStepSyncActiveRef.current) return;
+    if (tutorView !== "qa") return;
+    if (!playingAnswer) return;
+    const k = answerBulletIndex;
+    if (k === null) return;
+    if (lastQaAnswerHandwritingRef.current === k) return;
+    lastQaAnswerHandwritingRef.current = k;
+    void qaAnswerWhiteboardRef.current?.animateBullet(k);
+  }, [answerBulletIndex, playingAnswer, tutorView, lastQa?.answer]);
 
   React.useEffect(() => {
     return () => {
@@ -1066,6 +1124,8 @@ export default function TutorPage() {
     lastAnswerTtsTextRef.current = "";
     answerResumeTimeRef.current = 0;
     setAnswerPaused(false);
+    answerStepSyncActiveRef.current = false;
+    qaAnswerWhiteboardRef.current?.fillAllBullets();
 
     cancelSubtitleRaf();
     clearAudioHandlers();
@@ -1108,6 +1168,8 @@ export default function TutorPage() {
       setPlayingAnswer(false);
     }
     lectureResumeRef.current = null;
+    answerStepSyncActiveRef.current = false;
+    qaAnswerWhiteboardRef.current?.fillAllBullets();
     cancelSubtitleRaf();
     clearAudioHandlers();
     if (a) {
@@ -1223,7 +1285,10 @@ export default function TutorPage() {
     setNarrationBulletIndex(null);
     setAnswerBulletIndex(null);
     const slideForSync = s.slides[idx];
-    const segmentRanges = wordRangesForBulletSync(scriptText, slideForSync?.points ?? []);
+    const points = slideForSync?.points ?? [];
+    const segmentRanges = wordRangesForBulletSync(scriptText, points);
+    const savedBeforeLoad = narrationProgressRef.current[audioKey] ?? 0;
+    const useLectureStepSync = !isEli5Track && points.length > 0 && savedBeforeLoad <= 0.25;
     try {
       let url = narrationUrlsRef.current[audioKey];
       if (!url) {
@@ -1244,6 +1309,7 @@ export default function TutorPage() {
         audioRoleRef.current = "slide";
         a.src = url;
         const saved = narrationProgressRef.current[audioKey] ?? 0;
+
         const onReady = () => {
           const dur = a.duration;
           if (saved > 0.2 && Number.isFinite(dur) && dur > 0 && saved < dur - 0.12) {
@@ -1254,18 +1320,29 @@ export default function TutorPage() {
             setActiveSegment: setNarrationBulletIndex,
           });
         };
-        if (a.readyState >= 1) {
-          onReady();
-        } else {
-          a.onloadedmetadata = () => {
-            a.onloadedmetadata = null;
+
+        await new Promise<void>((resolve, reject) => {
+          if (a.readyState >= 1) {
             onReady();
-          };
-        }
+            resolve();
+          } else {
+            a.onloadedmetadata = () => {
+              a.onloadedmetadata = null;
+              onReady();
+              resolve();
+            };
+            a.onerror = () => {
+              a.onloadedmetadata = null;
+              reject(new Error("Could not load narration audio"));
+            };
+          }
+        });
+
         a.ontimeupdate = () => {
           narrationProgressRef.current[audioKey] = a.currentTime;
         };
         a.onended = () => {
+          lectureStepSyncActiveRef.current = false;
           clearAudioHandlers();
           audioRoleRef.current = null;
           setPlayingSlide(null);
@@ -1281,6 +1358,18 @@ export default function TutorPage() {
             void playNarration(next);
           }
         };
+
+        if (useLectureStepSync) {
+          lectureStepSyncActiveRef.current = true;
+          lastHandwritingBulletRef.current = null;
+          lectureWhiteboardRef.current?.reset();
+        } else {
+          lectureStepSyncActiveRef.current = false;
+          lastHandwritingBulletRef.current = null;
+          lectureWhiteboardRef.current?.reset();
+          lectureWhiteboardRef.current?.fillAllBullets();
+        }
+
         await a.play();
         if (
           groupSyncRef.current.host &&
@@ -1291,6 +1380,7 @@ export default function TutorPage() {
         }
       }
     } catch (e) {
+      lectureStepSyncActiveRef.current = false;
       clearAudioHandlers();
       audioRoleRef.current = null;
       setPlayingSlide(null);
@@ -1328,6 +1418,9 @@ export default function TutorPage() {
     }
     bookmarkCurrentAudioProgress();
     lectureResumeRef.current = null;
+    lectureStepSyncActiveRef.current = false;
+    answerStepSyncActiveRef.current = false;
+    qaAnswerWhiteboardRef.current?.fillAllBullets();
     const au = answerBlobUrlRef.current;
     if (au) {
       URL.revokeObjectURL(au);
@@ -1366,6 +1459,18 @@ export default function TutorPage() {
       opts?.bullets && opts.bullets.length > 0 ? opts.bullets : parseAnswerIntoBullets(text);
     const answerRanges = wordRangesForBulletSync(text, answerBullets);
 
+    const applyQaAnswerHandwritingMode = (seekSeconds: number) => {
+      const useSync = answerBullets.length > 0 && seekSeconds <= 0.25;
+      answerStepSyncActiveRef.current = useSync;
+      lastQaAnswerHandwritingRef.current = null;
+      setAnswerBulletIndex(null);
+      if (useSync) {
+        qaAnswerWhiteboardRef.current?.reset();
+      } else {
+        qaAnswerWhiteboardRef.current?.fillAllBullets();
+      }
+    };
+
     const bufferedSame = !!answerBlobUrlRef.current && lastAnswerTtsTextRef.current === text;
     if (bufferedSame) {
       if (!a.paused && !a.ended) return;
@@ -1385,6 +1490,7 @@ export default function TutorPage() {
       }
       const resumeT = answerResumeTimeRef.current;
       const seekTo = a.ended || resumeT < 0.12 ? 0 : resumeT;
+      applyQaAnswerHandwritingMode(seekTo);
       const onReady = () => {
         const dur = a.duration;
         if (Number.isFinite(dur) && dur > 0.1) {
@@ -1411,6 +1517,8 @@ export default function TutorPage() {
       a.onended = () => {
         clearAudioHandlers();
         audioRoleRef.current = null;
+        answerStepSyncActiveRef.current = false;
+        qaAnswerWhiteboardRef.current?.fillAllBullets();
         setPlayingAnswer(false);
         setAnswerPaused(false);
         setAnswerSubtitleLine("");
@@ -1447,6 +1555,7 @@ export default function TutorPage() {
     setAnswerSubtitleLine("");
     lastAnswerTtsTextRef.current = text;
     answerResumeTimeRef.current = 0;
+    applyQaAnswerHandwritingMode(0);
     try {
       const gid = groupIdRef.current;
       const glive = groupSyncRef.current.live;
@@ -1482,6 +1591,8 @@ export default function TutorPage() {
         ap.onended = () => {
           clearAudioHandlers();
           audioRoleRef.current = null;
+          answerStepSyncActiveRef.current = false;
+          qaAnswerWhiteboardRef.current?.fillAllBullets();
           setPlayingAnswer(false);
           setAnswerPaused(false);
           setAnswerSubtitleLine("");
@@ -1492,6 +1603,8 @@ export default function TutorPage() {
         await ap.play();
       }
     } catch (e) {
+      answerStepSyncActiveRef.current = false;
+      qaAnswerWhiteboardRef.current?.fillAllBullets();
       setPlayingAnswer(false);
       setAnswerSubtitleLine("");
       setAnswerBulletIndex(null);
@@ -2061,11 +2174,186 @@ export default function TutorPage() {
             ) : null}
 
             {showLessonGrid ? (
-              <>
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+              <div
+                className={
+                  immersiveTeaching
+                    ? "fixed inset-0 z-[100] flex flex-col overflow-hidden bg-background/97 shadow-[0_0_80px_-20px_rgba(0,0,0,0.35)] backdrop-blur-md"
+                    : undefined
+                }
+              >
+                {immersiveTeaching ? (
+                  <header className="flex shrink-0 flex-col gap-3 border-b border-border/80 bg-gradient-to-r from-muted/40 via-background to-muted/30 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Live teaching
+                      </p>
+                      <p className="truncate text-sm font-semibold text-foreground">
+                        {tutorView === "qa"
+                          ? "Question & answer"
+                          : `Slide ${slideIndex + 1} / ${activeSession.slides.length}`}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {tutorView === "lecture" ? (
+                        <>
+                          <div className="flex flex-wrap gap-1.5 border-r border-border/60 pr-2 sm:gap-2">
+                            <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                className="size-3 rounded border-input accent-primary"
+                                checked={autoAdvanceNarration}
+                                disabled={groupControlsLocked}
+                                onChange={(e) => setAutoAdvanceNarration(e.target.checked)}
+                              />
+                              Auto-advance
+                            </label>
+                            {!isGroupLive ? (
+                              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  className="size-3 rounded border-input accent-primary"
+                                  checked={alertSounds}
+                                  onChange={(e) => setAlertSounds(e.target.checked)}
+                                />
+                                Focus beeps
+                              </label>
+                            ) : null}
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8"
+                            disabled={slideIndex <= 0 || groupControlsLocked}
+                            onClick={() => {
+                              setTutorView("lecture");
+                              stopNarration();
+                              setSlideIndex((i) => {
+                                const next = Math.max(0, i - 1);
+                                emitHostLesson({ kind: "slide", slideIndex: next });
+                                return next;
+                              });
+                            }}
+                          >
+                            <ChevronLeft className="mr-1 size-3.5" />
+                            Prev
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8"
+                            disabled={slideIndex >= activeSession.slides.length - 1 || groupControlsLocked}
+                            onClick={() => {
+                              setTutorView("lecture");
+                              stopNarration();
+                              setSlideIndex((i) => {
+                                const next = Math.min(activeSession.slides.length - 1, i + 1);
+                                emitHostLesson({ kind: "slide", slideIndex: next });
+                                return next;
+                              });
+                            }}
+                          >
+                            Next
+                            <ChevronRight className="ml-1 size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-8 bg-primary text-primary-foreground"
+                            disabled={narrationLoading || !slide || eli5Busy || groupControlsLocked}
+                            onClick={() => void playNarration(slideIndex)}
+                          >
+                            {narrationLoading && playingSlide === slideIndex ? (
+                              <Loader2 className="mr-1 size-3.5 animate-spin" />
+                            ) : (
+                              <Play className="mr-1 size-3.5" />
+                            )}
+                            Play
+                          </Button>
+                          {!isGroupLive ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-8"
+                              disabled={
+                                !slide || eli5Busy || narrationLoading || questionSubmitting || asking
+                              }
+                              onClick={() => void startExplainLikeImFive()}
+                            >
+                              {eli5Busy ? (
+                                <Loader2 className="mr-1 size-3.5 animate-spin" />
+                              ) : (
+                                <Baby className="mr-1 size-3.5" />
+                              )}
+                              ELI5
+                            </Button>
+                          ) : null}
+                          {playingSlide !== null || playingAnswer ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8"
+                              disabled={groupControlsLocked && !playingAnswer}
+                              onClick={() => {
+                                if (playingAnswer) pauseAnswerPlayback();
+                                else stopNarration();
+                              }}
+                            >
+                              <Square className="mr-1 size-3.5" />
+                              Pause
+                            </Button>
+                          ) : null}
+                        </>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            pauseAnswerPlayback();
+                            setAnswerBulletIndex(null);
+                            setTutorView("lecture");
+                          }}
+                        >
+                          Back to slides
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="h-8 gap-1.5"
+                        onClick={() => setImmersiveTeaching(false)}
+                      >
+                        <Minimize2 className="size-3.5" />
+                        Exit full view
+                      </Button>
+                    </div>
+                  </header>
+                ) : null}
+                <div
+                  className={
+                    immersiveTeaching
+                      ? "flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden px-3 pb-6 pt-2 sm:px-5"
+                      : undefined
+                  }
+                >
+                  <>
+                <div
+                  className={cn(
+                    "grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]",
+                    immersiveTeaching &&
+                      !isGroupLive &&
+                      "gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,13rem)] 2xl:grid-cols-[minmax(0,1fr)_minmax(0,14rem)]",
+                  )}
+                >
                   <Card
                     className={cn(
                       "min-w-0 border-border shadow-sm transition-shadow duration-500",
+                      immersiveTeaching && "border-border/80 shadow-md",
                       tutorView === "lecture" &&
                         playingSlide === slideIndex &&
                         "ring-2 ring-primary/25 shadow-lg shadow-primary/10",
@@ -2108,50 +2396,27 @@ export default function TutorPage() {
                               {activeSession.topicFocus ? `Focus: ${activeSession.topicFocus}` : "Full material"}
                             </span>
                           )}
+                          {!immersiveTeaching ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              className="shrink-0"
+                              title="Full-screen teaching view"
+                              aria-label="Open full-screen teaching view"
+                              onClick={() => setImmersiveTeaching(true)}
+                            >
+                              <Maximize2 className="size-4" />
+                            </Button>
+                          ) : null}
                         </div>
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      {(avatarTeaching || avatarListening) && (
-                        <div className="rounded-xl border border-border/70 bg-muted/20 p-3">
-                          <div className="flex items-center gap-3">
-                            <div
-                              className={cn(
-                                "relative flex h-16 w-14 shrink-0 items-end justify-center overflow-hidden rounded-lg border bg-background transition-all duration-300",
-                                avatarMoodClass,
-                              )}
-                              aria-hidden
-                            >
-                              <span className="absolute top-1 text-[22px] leading-none">{avatarFace}</span>
-                              <span className="absolute bottom-1 text-[10px] text-muted-foreground">teacher</span>
-                              {avatarListening ? (
-                                <span className="absolute -right-1 -top-1 inline-flex h-3 w-3 animate-ping rounded-full bg-violet-500" />
-                              ) : null}
-                            </div>
-                            <div className="min-w-0">
-                              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                                Virtual teacher
-                              </p>
-                              <p className="text-sm font-medium text-foreground">{avatarLabel}</p>
-                              <p className="text-xs text-muted-foreground">
-                                {avatarListening
-                                  ? "I am listening to your question carefully."
-                                  : avatarPaused
-                                    ? "Session is paused. Press play when you are ready."
-                                    : "I am guiding you through this slide."}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      )}
                       {tutorView === "qa" ? (
                         <div className="space-y-4">
                           {questionSubmitting && !lastQa ? (
                             <div className="flex flex-col items-center justify-center gap-4 py-10 text-center">
-                              <div className="flex items-center gap-2 rounded-full border border-violet-400/40 bg-violet-500/10 px-3 py-1 text-xs font-medium text-violet-800 dark:text-violet-200">
-                                <GraduationCap className="size-3.5" aria-hidden />
-                                Teacher is listening and preparing an answer...
-                              </div>
                               <div className="relative flex size-16 items-center justify-center">
                                 <span className="absolute inline-flex size-14 animate-ping rounded-full bg-primary/25" />
                                 <Loader2 className="relative size-10 animate-spin text-primary" aria-hidden />
@@ -2166,39 +2431,21 @@ export default function TutorPage() {
                           ) : null}
                           {lastQa ? (
                             <>
-                              <div className="rounded-xl border border-violet-500/25 bg-gradient-to-br from-violet-500/[0.08] to-transparent p-4 dark:from-violet-500/12">
-                                <p className="text-[10px] font-bold uppercase tracking-wider text-violet-800 dark:text-violet-200">
-                                  {lastQa.askerName?.trim()
+                              <TutorQaWhiteboard
+                                ref={qaAnswerWhiteboardRef}
+                                askerLabel={
+                                  lastQa.askerName?.trim()
                                     ? `${lastQa.askerName.trim()} asked`
-                                    : "You asked"}
-                                </p>
-                                <p className="mt-2 text-sm font-medium leading-relaxed text-foreground">
-                                  {lastQa.question}
-                                </p>
-                              </div>
-                              <div>
-                                <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                                  Answer outline
-                                </p>
-                                <ul className="space-y-2">
-                                  {lastQaAnswerBullets.map((b, i) => (
-                                    <li
-                                      key={`qa-${i}-${b.slice(0, 20)}`}
-                                      ref={(el) => {
-                                        qaBulletRefs.current[i] = el;
-                                      }}
-                                      className={cn(
-                                        "list-none rounded-xl border px-3 py-2.5 text-sm leading-snug transition-all duration-300",
-                                        answerBulletIndex === i && playingAnswer
-                                          ? "border-primary/50 bg-primary/[0.14] shadow-md ring-2 ring-primary/35"
-                                          : "border-border/70 bg-muted/30",
-                                      )}
-                                    >
-                                      {b}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
+                                    : "You asked"
+                                }
+                                question={lastQa.question}
+                                bullets={lastQaAnswerBullets}
+                                presentation={immersiveTeaching ? "immersive" : "default"}
+                                qaBulletRefs={qaBulletRefs}
+                                answerBulletIndex={answerBulletIndex}
+                                answerVisualActive={playingAnswer || answerPaused}
+                                fillAnswerOutlineWhenIdle={!playingAnswer && !answerPaused}
+                              />
                               {questionSubmitting && lastQa ? (
                                 <div className="flex items-center gap-2 rounded-lg border border-dashed border-primary/35 bg-primary/5 px-3 py-3 text-sm text-muted-foreground">
                                   <Loader2 className="size-4 shrink-0 animate-spin" aria-hidden />
@@ -2245,36 +2492,15 @@ export default function TutorPage() {
                         </div>
                       ) : slide ? (
                         <div className="space-y-4">
-                          <h2
-                            className={cn(
-                              "text-xl font-semibold tracking-tight text-primary transition-all duration-300",
-                              playingSlide === slideIndex && "drop-shadow-sm",
-                            )}
-                          >
-                            {slide.title}
-                          </h2>
-                          <p className="text-xs text-muted-foreground">
-                            Bullets highlight in order as the tutor speaks—follow the glow to stay oriented.
-                          </p>
-                          <ul className="space-y-1.5 text-sm text-foreground/90">
-                            {slide.points.map((p, i) => (
-                              <li
-                                key={i}
-                                ref={(el) => {
-                                  lecturePointRefs.current[i] = el;
-                                }}
-                                className={cn(
-                                  "flex gap-2 rounded-xl border border-transparent py-1.5 pl-2 pr-2 transition-all duration-300",
-                                  "before:mt-1.5 before:size-1.5 before:shrink-0 before:rounded-full before:bg-primary/50 before:content-['']",
-                                  narrationBulletIndex === i && playingSlide === slideIndex
-                                    ? "border-primary/40 bg-primary/[0.12] shadow-md ring-2 ring-primary/30 before:bg-primary"
-                                    : "hover:bg-muted/40",
-                                )}
-                              >
-                                <span className="min-w-0 leading-snug">{p}</span>
-                              </li>
-                            ))}
-                          </ul>
+                          <TutorLectureWhiteboard
+                            ref={lectureWhiteboardRef}
+                            title={slide.title}
+                            points={slide.points}
+                            presentation={immersiveTeaching ? "immersive" : "default"}
+                            pointRefs={lecturePointRefs}
+                            narrationBulletIndex={narrationBulletIndex}
+                            narrationActive={playingSlide === slideIndex}
+                          />
                           <div className="space-y-2">
                             <div className="flex flex-wrap items-center justify-between gap-2">
                               <p className="text-xs font-medium text-muted-foreground">What the tutor is saying</p>
@@ -2286,7 +2512,10 @@ export default function TutorPage() {
                             </div>
                             <div
                               className={cn(
-                                "relative flex min-h-[3rem] items-center justify-center rounded-lg border border-dashed border-border/80 bg-muted/20 px-2 py-2.5 text-center",
+                                "relative flex min-h-[3rem] items-center justify-center rounded-xl border px-2 py-2.5 text-center",
+                                immersiveTeaching
+                                  ? "border-emerald-900/20 bg-[#eef3ef] shadow-[inset_0_2px_8px_rgba(0,40,20,0.06)] dark:border-emerald-500/25 dark:bg-[#1a221e]"
+                                  : "rounded-lg border-dashed border-border/80 bg-muted/20",
                                 playingSlide === slideIndex && narrationSubtitleLine && "border-primary/40 bg-primary/5",
                                 !isGroupLive &&
                                   eli5ForSlideIndex === slideIndex &&
@@ -2331,7 +2560,12 @@ export default function TutorPage() {
                           </div>
                         </div>
                       ) : null}
-                      <div className="flex flex-col gap-3 border-t border-border pt-4">
+                      <div
+                        className={cn(
+                          "flex flex-col gap-3 border-t border-border pt-4",
+                          immersiveTeaching && "hidden",
+                        )}
+                      >
                         {tutorView === "qa" ? (
                           <p className="text-xs text-muted-foreground">
                             The lesson slide returns automatically when the answer finishes. Use{" "}
@@ -2466,7 +2700,12 @@ export default function TutorPage() {
                     </CardContent>
                   </Card>
 
-                  <div className="flex min-w-0 flex-col gap-4">
+                  <div
+                    className={cn(
+                      "flex min-w-0 flex-col gap-4",
+                      immersiveTeaching && !isGroupLive && "xl:max-w-[13rem] 2xl:max-w-[14rem]",
+                    )}
+                  >
                     {isGroupLive && groupDetail ? (
                       <>
                         <Card className="min-w-0 border-border shadow-sm">
@@ -2603,19 +2842,27 @@ export default function TutorPage() {
                           className={cn(
                             "min-w-0 overflow-hidden border-border shadow-sm",
                             focus?.alarm && "border-destructive ring-1 ring-destructive/40",
+                            immersiveTeaching && "shadow-sm",
                           )}
                         >
-                          <CardHeader className="pb-2">
+                          <CardHeader className={cn("pb-2", immersiveTeaching && "space-y-0 pb-1.5")}>
                             <div className="flex items-center gap-2">
-                              <ScanEye className="size-5 text-primary" />
-                              <CardTitle className="text-base">You</CardTitle>
+                              <ScanEye className={cn("text-primary", immersiveTeaching ? "size-4" : "size-5")} />
+                              <CardTitle className={immersiveTeaching ? "text-sm" : "text-base"}>You</CardTitle>
                             </div>
-                            <CardDescription>
+                            <CardDescription className={immersiveTeaching ? "sr-only" : undefined}>
                               Turn your camera on so Acadomi can celebrate focus and offer gentle reminders.
                             </CardDescription>
                           </CardHeader>
-                          <CardContent className="space-y-3">
-                            <div className="relative aspect-video w-full overflow-hidden rounded-md bg-black">
+                          <CardContent className={cn("space-y-3", immersiveTeaching && "space-y-2 pt-0")}>
+                            <div
+                              className={cn(
+                                "relative w-full overflow-hidden rounded-md bg-black",
+                                immersiveTeaching
+                                  ? "mx-auto aspect-video max-h-[min(7rem,16vh)] max-w-[13rem]"
+                                  : "aspect-video",
+                              )}
+                            >
                               <video
                                 ref={videoRef}
                                 className="h-full w-full object-cover"
@@ -2630,14 +2877,25 @@ export default function TutorPage() {
                               ) : null}
                             </div>
                             <canvas ref={canvasRef} className="hidden" aria-hidden />
-                            <div className="flex flex-wrap gap-2">
+                            <div className={cn("flex flex-wrap gap-2", immersiveTeaching && "justify-center")}>
                               {!camOn ? (
-                                <Button type="button" size="sm" onClick={() => void startCam()}>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className={immersiveTeaching ? "h-8 text-xs" : undefined}
+                                  onClick={() => void startCam()}
+                                >
                                   <Video className="mr-2 size-4" />
                                   Enable camera &amp; mic
                                 </Button>
                               ) : (
-                                <Button type="button" size="sm" variant="outline" onClick={() => void stopCam()}>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className={immersiveTeaching ? "h-8 text-xs" : undefined}
+                                  onClick={() => void stopCam()}
+                                >
                                   <VideoOff className="mr-2 size-4" />
                                   Stop camera
                                 </Button>
@@ -2646,26 +2904,36 @@ export default function TutorPage() {
                           </CardContent>
                         </Card>
 
-                        <Card className="border-border shadow-sm">
-                          <CardHeader className="pb-2">
-                            <CardTitle className="text-base">Focus</CardTitle>
-                            <CardDescription>
+                        <Card className={cn("border-border shadow-sm", immersiveTeaching && "shadow-sm")}>
+                          <CardHeader className={cn("pb-2", immersiveTeaching && "space-y-0 pb-1.5")}>
+                            <CardTitle className={immersiveTeaching ? "text-sm" : "text-base"}>Focus</CardTitle>
+                            <CardDescription className={immersiveTeaching ? "sr-only" : undefined}>
                               Live readout of how present you look on camera. Numbers update as you learn; use them
                               as feedback, not a grade.
                             </CardDescription>
                           </CardHeader>
-                          <CardContent className="space-y-3">
+                          <CardContent className={cn("space-y-3", immersiveTeaching && "space-y-2 pt-0")}>
                             <div
                               className={cn(
-                                "rounded-lg border border-border px-3 py-3 text-center text-sm font-semibold",
+                                "rounded-lg border border-border text-center text-sm font-semibold",
+                                immersiveTeaching ? "px-2 py-2" : "px-3 py-3",
                                 focusTone(focus),
                               )}
                             >
                               {focus ? (
                                 <>
-                                  <div className="text-lg tracking-tight">{focus.status}</div>
+                                  <div
+                                    className={cn("tracking-tight", immersiveTeaching ? "text-sm" : "text-lg")}
+                                  >
+                                    {focus.status}
+                                  </div>
                                   {focus.focusVal !== null ? (
-                                    <div className="mt-1 font-mono text-2xl tabular-nums">
+                                    <div
+                                      className={cn(
+                                        "mt-1 font-mono tabular-nums",
+                                        immersiveTeaching ? "text-xl" : "text-2xl",
+                                      )}
+                                    >
                                       {focus.focusVal}
                                       <span className="ml-1 text-xs font-normal text-muted-foreground">/ 100</span>
                                     </div>
@@ -2688,7 +2956,12 @@ export default function TutorPage() {
                               </p>
                             ) : null}
                             {focus && (focus.pitch != null || focus.ear != null) ? (
-                              <div className="max-h-48 overflow-y-auto rounded-md border border-border bg-muted/20 p-2">
+                              <div
+                                className={cn(
+                                  "overflow-y-auto rounded-md border border-border bg-muted/20 p-2",
+                                  immersiveTeaching ? "max-h-24" : "max-h-48",
+                                )}
+                              >
                                 <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                                   Live metrics
                                 </p>
@@ -2866,7 +3139,12 @@ export default function TutorPage() {
 
                 <audio ref={audioRef} className="hidden" />
 
-                <div className="pointer-events-none fixed bottom-20 right-4 z-40 md:bottom-10 md:right-6 print:hidden">
+                <div
+                  className={cn(
+                    "pointer-events-none fixed bottom-20 right-4 md:bottom-10 md:right-6 print:hidden",
+                    immersiveTeaching ? "z-[110]" : "z-40",
+                  )}
+                >
                   <div className="pointer-events-auto flex flex-col items-center gap-1">
                     <span className="rounded-md bg-background/95 px-2 py-0.5 text-center text-[10px] font-medium text-muted-foreground shadow-sm ring-1 ring-border">
                       Ask
@@ -2894,6 +3172,8 @@ export default function TutorPage() {
                   </div>
                 </div>
               </>
+                </div>
+              </div>
             ) : null}
           </div>
         </div>
