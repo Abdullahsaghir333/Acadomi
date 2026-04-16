@@ -2,6 +2,8 @@
 
 Generates a two-speaker script with **Google Gemini** and audio with **gTTS** + **pydub**.
 
+**Voices:** The hosts are **Maya** (female) and **Jonah** (male). gTTS has no gender selector; we use **UK English** (`tld=co.uk`) for Maya and **US English** (`tld=us`) for Jonah, then a light **pydub pitch shift** on Jonah’s lines so the two reads are easier to tell apart.
+
 ## Prerequisites
 
 - **Python 3.12.x** (see `.python-version`; use [pyenv](https://github.com/pyenv/pyenv) / [pyenv-win](https://github.com/pyenv-win/pyenv-win)).  

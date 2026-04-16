@@ -262,10 +262,7 @@ def ensure_pydub_ffmpeg() -> None:
     _PYDUB_FFMPEG_READY = True
 
 
-def _configure_gemini(
-    override_key: str | None = None,
-    override_model: str | None = None,
-) -> str:
+def _configure_gemini_key(override_key: str | None = None) -> str:
     key = (override_key or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
     if not key:
         raise RuntimeError(
@@ -273,8 +270,7 @@ def _configure_gemini(
             "or set it in python/services/podcast/.env when running the podcast app alone."
         )
     genai.configure(api_key=key)
-    model = (override_model or "").strip() or os.environ.get("GEMINI_MODEL", "").strip()
-    return model or "gemini-2.5-flash"
+    return key
 
 
 def _strip_json_fences(text: str) -> str:
@@ -282,6 +278,21 @@ def _strip_json_fences(text: str) -> str:
     t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE | re.MULTILINE)
     t = re.sub(r"\s*```\s*$", "", t, flags=re.MULTILINE)
     return t.strip()
+
+
+# Two-host podcast: Gemini uses these exact speaker ids; gTTS uses different regional endpoints + light pydub shaping.
+SPEAKER_FEMALE = "Maya"
+SPEAKER_MALE = "Jonah"
+
+
+def _pitch_shift_semitones(seg: AudioSegment, semitones: float) -> AudioSegment:
+    """Slightly lower pitch (gTTS has no male/female toggle; this nudges the male line)."""
+    if abs(semitones) < 0.05:
+        return seg
+    factor = 2.0 ** (semitones / 12.0)
+    new_sr = int(seg.frame_rate * factor)
+    shifted = seg._spawn(seg.raw_data, overrides={"frame_rate": new_sr})
+    return shifted.set_frame_rate(seg.frame_rate)
 
 
 def _parse_dialogue_json_array(raw: str) -> list[Any]:
@@ -332,26 +343,33 @@ def generate_script_from_gemini(
     gemini_api_key: str | None = None,
     gemini_model: str | None = None,
 ) -> list[dict[str, str]]:
-    model_name = _configure_gemini(gemini_api_key, gemini_model)
-    model = genai.GenerativeModel(model_name)
+    _configure_gemini_key(gemini_api_key)
+
+    primary = (gemini_model or "").strip() or os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
+    candidates: list[str] = []
+    for name in (primary, "gemini-2.5-flash-lite", "gemini-3.1-flash"):
+        name = name.strip()
+        if name and name not in candidates:
+            candidates.append(name)
 
     text = source_text.strip()
     if len(text) > 120_000:
         text = text[:120_000] + "\n\n[truncated for model context]"
 
     prompt = f"""You are a podcast scriptwriter. Convert the following study material into a natural,
-two-person conversational podcast between Alice (female) and Bob (male).
+two-person conversational podcast between {SPEAKER_FEMALE} (warm, curious host — female voice) and
+{SPEAKER_MALE} (clear, thoughtful co-host — male voice).
 
 RULES:
 - Do NOT invent facts beyond what the material reasonably supports
 - Stay faithful to the meaning of the text
-- Friendly, clear, suitable for students
-- Alternate speakers (Alice, then Bob, then Alice, …)
+- Friendly, clear, suitable for students; make the banter engaging but grounded in the material
+- Alternate speakers ({SPEAKER_FEMALE}, then {SPEAKER_MALE}, then {SPEAKER_FEMALE}, …)
 - About 8–14 short turns total
 - Only dialogue, no stage directions
 - Output ONLY valid JSON (no markdown fences), exactly this shape:
-  [{{"speaker":"Alice","text":"..."}},{{"speaker":"Bob","text":"..."}}, ...]
-- speaker must be exactly "Alice" or "Bob"
+  [{{"speaker":"{SPEAKER_FEMALE}","text":"..."}},{{"speaker":"{SPEAKER_MALE}","text":"..."}}, ...]
+- speaker must be exactly "{SPEAKER_FEMALE}" or "{SPEAKER_MALE}"
 - text must be plain English suitable for text-to-speech (no emojis, minimal punctuation)
 - Do not add any text, labels, or commentary before or after the JSON array
 
@@ -362,7 +380,24 @@ MATERIAL:
 
 Your entire reply must be only the JSON array, nothing else:"""
 
-    response = model.generate_content(prompt)
+    last_error: Exception | None = None
+    response = None
+    for model_name in candidates:
+        model = genai.GenerativeModel(model_name)
+        try:
+            response = model.generate_content(prompt)
+            break
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            # Fallback only on transient/service errors (e.g. 503, 429, resource exhausted).
+            transient = "503" in msg or "Service Unavailable" in msg or "RESOURCE_EXHAUSTED" in msg or "429" in msg
+            if not transient:
+                raise
+            last_error = exc
+
+    if response is None:
+        raise last_error or RuntimeError("All Gemini podcast models failed for this request.")
+
     raw = (response.text or "").strip()
     data = _parse_dialogue_json_array(raw)
 
@@ -372,7 +407,7 @@ Your entire reply must be only the JSON array, nothing else:"""
             continue
         sp = str(item.get("speaker", "")).strip()
         tx = str(item.get("text", "")).strip()
-        if sp not in ("Alice", "Bob") or not tx:
+        if sp not in (SPEAKER_FEMALE, SPEAKER_MALE) or not tx:
             continue
         lines.append({"speaker": sp, "text": tx})
 
@@ -389,14 +424,15 @@ def create_podcast_mp3_bytes(script: list[dict[str, str]]) -> tuple[bytes, int]:
     tmpdir = tempfile.mkdtemp(prefix="acadomi_pod_")
     try:
         for i, turn in enumerate(script):
-            tts = gTTS(
-                text=turn["text"],
-                lang="en",
-                tld="co.uk" if turn["speaker"] == "Alice" else "co.in",
-            )
+            sp = turn["speaker"]
+            # Regional Google Translate TTS: UK (often brighter) vs US (typically lower / distinct from co.uk).
+            tld = "co.uk" if sp == SPEAKER_FEMALE else "us"
+            tts = gTTS(text=turn["text"], lang="en", tld=tld, slow=False)
             path = os.path.join(tmpdir, f"line_{i}.mp3")
             tts.save(path)
             seg = AudioSegment.from_mp3(path)
+            if sp == SPEAKER_MALE:
+                seg = _pitch_shift_semitones(seg, -1.25)
             segments.append(seg)
             segments.append(AudioSegment.silent(duration=400))
         if not segments:
