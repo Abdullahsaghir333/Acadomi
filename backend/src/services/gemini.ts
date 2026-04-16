@@ -1,46 +1,89 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-/** Read env on each call — `.env` is applied in `index.ts` after imports, so module-level `process.env` would be stale. */
-function getModel() {
+type GeminiModelInvoker<T> = (model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>) => Promise<T>;
+
+function getGeminiApiKey(): string {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured");
   }
-  const modelName = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+  return apiKey;
+}
+
+/**
+ * Run a Gemini call with automatic model fallback.
+ *
+ * Order:
+ * - Primary: GEMINI_MODEL or gemini-2.5-flash
+ * - Fallbacks: gemini-2.5-flash-lite, gemini-3.1-flash
+ *
+ * We only fall back on transient GoogleGenerativeAI fetch errors (503/429).
+ */
+async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<T> {
+  const apiKey = getGeminiApiKey();
+  const primary = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
+  const candidates = [primary, "gemini-2.5-flash-lite", "gemini-3.1-flash"].filter(
+    (value, index, self) => value && self.indexOf(value) === index,
+  );
+
   const genAI = new GoogleGenerativeAI(apiKey);
-  return genAI.getGenerativeModel({ model: modelName });
+  let lastError: unknown;
+
+  for (const modelName of candidates) {
+    const model = genAI.getGenerativeModel({ model: modelName });
+    try {
+      return await invoke(model);
+    } catch (err: any) {
+      const status = typeof err?.status === "number" ? err.status : undefined;
+      const name = err?.name ?? err?.constructor?.name;
+      const isGoogleFetchError =
+        name === "GoogleGenerativeAIFetchError" || typeof status === "number";
+      const isTransient = status === 503 || status === 429;
+
+      if (!isGoogleFetchError || !isTransient) {
+        throw err;
+      }
+
+      lastError = err;
+      // Try next candidate in the list.
+    }
+  }
+
+  throw lastError ?? new Error("All Gemini models failed for this request.");
 }
 
 export async function extractTextFromImage(buffer: Buffer, mimeType: string): Promise<string> {
-  const model = getModel();
   const prompt =
     "Extract all readable text from this image with maximum accuracy. If text is small, rotated, or low contrast, still try to read it. Return only plain text in English.";
-  const result = await model.generateContent([
-    { text: prompt },
-    {
-      inlineData: {
-        mimeType: mimeType || "image/png",
-        data: buffer.toString("base64"),
+  const result = await runWithGeminiFallback((model) =>
+    model.generateContent([
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: mimeType || "image/png",
+          data: buffer.toString("base64"),
+        },
       },
-    },
-  ]);
+    ]),
+  );
   const text = result.response.text();
   return text.trim();
 }
 
 export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
-  const model = getModel();
   const prompt =
     "Transcribe this audio with high accuracy. Handle background noise and accents. Return only the clean transcription in English.";
-  const result = await model.generateContent([
-    { text: prompt },
-    {
-      inlineData: {
-        mimeType: mimeType || "audio/webm",
-        data: buffer.toString("base64"),
+  const result = await runWithGeminiFallback((model) =>
+    model.generateContent([
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: mimeType || "audio/webm",
+          data: buffer.toString("base64"),
+        },
       },
-    },
-  ]);
+    ]),
+  );
   return result.response.text().trim();
 }
 
@@ -51,7 +94,6 @@ export async function synthesizeLearningNotes(
   extractedText: string,
   userPrompt: string,
 ): Promise<string> {
-  const model = getModel();
   const instructions = userPrompt.trim() || "No extra instructions.";
   const body = `You are Acadomi, an assistant for higher-education learners.
 
@@ -70,7 +112,7 @@ Produce a clear, professional response in markdown with:
 
 Keep tone academic but approachable. If the source is empty or unusable, say so briefly.`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   return result.response.text().trim();
 }
 
@@ -198,7 +240,6 @@ export async function evaluateRoleReversalTeaching(params: {
   referenceMaterial: string;
   studentTranscript: string;
 }): Promise<RoleReversalEvaluation> {
-  const model = getModel();
   const topic = params.topic.trim();
   const ref = params.referenceMaterial.trim().slice(0, 100_000);
   const student = params.studentTranscript.trim().slice(0, 50_000);
@@ -244,7 +285,7 @@ ${student}
 
 Be fair: reward correct ideas; note gaps vs reference. JSON only:`;
 
-  const result = await model.generateContent(prompt);
+  const result = await runWithGeminiFallback((model) => model.generateContent(prompt));
   const rawText = result.response.text().trim();
   let parsed: unknown;
   try {
@@ -297,7 +338,6 @@ export async function generateTutorSlidesAndScripts(
   material: string,
   topicFocus?: string,
 ): Promise<TutorSlideDraft[]> {
-  const model = getModel();
   const focus = topicFocus?.trim()
     ? `Learner focus / topic to emphasize (still cover the rest at a high level):\n${topicFocus.trim()}\n\n`
     : "";
@@ -317,7 +357,7 @@ Rules:
 - Bullets are concise; the script expands and teaches them.
 - Stay faithful to the material; do not invent facts not supported by the text.`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   const rawText = result.response.text().trim();
   let parsed: unknown;
   try {
@@ -342,7 +382,6 @@ export async function answerTutorQuestion(params: {
   slideScript: string;
   materialExcerpt: string;
 }): Promise<string> {
-  const model = getModel();
   const q = params.question.trim().slice(0, 8000);
   const body = `You are a live tutor in a video-style session. The student asked a question during this slide.
 Answer clearly in 2–6 short sentences. No markdown headings. If the question is unclear, ask one brief clarifying question.
@@ -358,7 +397,7 @@ ${params.materialExcerpt.trim().slice(0, 24_000)}
 
 Student question: ${q}`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   return result.response.text().trim();
 }
 
@@ -371,7 +410,6 @@ export async function generateTutorSlideEli5Script(params: {
   slideScript: string;
   materialExcerpt: string;
 }): Promise<string> {
-  const model = getModel();
   const body = `The learner pressed "Explain like I'm five" for ONE slide. Write a single script the tutor will read aloud.
 Rules:
 - Use very simple words and short sentences (like talking to a bright 5-year-old). Stay warm, not babyish to an adult.
@@ -389,7 +427,7 @@ Reference material (for accuracy only):
 ${params.materialExcerpt.trim().slice(0, 14_000)}
 ---`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   return result.response.text().trim().slice(0, 6000);
 }
 
@@ -407,7 +445,6 @@ export async function generateSmartCheatSheetMarkdown(
   material: string,
   topic: string,
 ): Promise<string> {
-  const model = getModel();
   const excerpt = material.trim().slice(0, 100_000);
   const focus = topic.trim().slice(0, 500);
 
@@ -433,7 +470,7 @@ Strict output rules (follow all):
 
 Output **only** valid Markdown for the cheat sheet. No preamble, no closing commentary, no code fences wrapping the whole document.`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   const raw = result.response.text().trim();
   return stripOuterMarkdownFence(raw).trim().slice(0, 120_000);
 }
@@ -446,7 +483,6 @@ export async function generateBookmarkRecapScript(params: {
   materialExcerpt: string;
   slideTitle?: string;
 }): Promise<string> {
-  const model = getModel();
   const slide = params.slideTitle?.trim() ? `Slide context: ${params.slideTitle.trim().slice(0, 200)}\n` : "";
   const body = `You are Acadomi. The learner bookmarked this passage from their AI tutor:
 "${params.bookmarkLine.trim().slice(0, 14_000)}"
@@ -463,7 +499,7 @@ Write a **short audio recap** they can listen to (about 55–130 words). Rules:
 
 Output ONLY the spoken script, nothing else.`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   return result.response.text().trim().slice(0, 4000);
 }
 
@@ -478,7 +514,6 @@ export async function answerBookmarkQuestion(params: {
   message: string;
   history: BookmarkChatTurn[];
 }): Promise<string> {
-  const model = getModel();
   const hist = params.history
     .slice(-8)
     .map((t) => `${t.role === "user" ? "Learner" : "Tutor"}: ${t.content}`)
@@ -499,6 +534,6 @@ ${params.message.trim().slice(0, 4000)}
 
 Reply with a clear, helpful answer (markdown allowed for formulas/code if needed). Stay grounded in the material; if the question goes beyond it, say what you can infer and what is unknown. Keep it focused — roughly 80–350 words unless they ask for depth.`;
 
-  const result = await model.generateContent(body);
+  const result = await runWithGeminiFallback((model) => model.generateContent(body));
   return result.response.text().trim().slice(0, 12_000);
 }
