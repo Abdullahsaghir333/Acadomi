@@ -96,7 +96,13 @@ export function registerTutorGroupSocket(io: Server): void {
         const isHost = g.hostUserId.equals(uid);
         const accepted = g.acceptedUserIds.some((x) => x.equals(uid));
         if (!isHost && !accepted) return;
-        io.to(`group:${gid}`).emit("group:media_pause", { byUserId: data.userId });
+        const u = await User.findById(data.userId)
+          .select("firstName lastName")
+          .lean<{ firstName?: string; lastName?: string } | null>();
+        const userName = u
+          ? `${u.firstName ?? ""} ${u.lastName ?? ""}`.trim() || "Friend"
+          : "Friend";
+        io.to(`group:${gid}`).emit("group:media_pause", { byUserId: data.userId, userName });
       })();
     });
 

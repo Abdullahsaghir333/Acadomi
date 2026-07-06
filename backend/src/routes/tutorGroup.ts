@@ -528,6 +528,8 @@ router.post("/:id/ask", authMiddleware, upload.single("audio"), async (req: Auth
       askerId: req.userId,
       question,
       answer,
+      questionAudioBase64: file.buffer.toString("base64"),
+      questionAudioMimeType: file.mimetype || "audio/webm",
     });
 
     return res.json({ question, answer });

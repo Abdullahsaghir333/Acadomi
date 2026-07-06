@@ -260,7 +260,12 @@ function TutorPageContent() {
     playNarration: (_i: number) => {},
     stopNarration: () => {},
     pauseAnswer: () => {},
-    playAnswerTts: (_t: string, _bullets?: string[]) => {},
+    playAnswerTts: (
+      _t: string,
+      _bullets?: string[],
+      _onEnded?: () => void,
+      _questionAudio?: { base64: string; mimeType: string },
+    ) => {},
     setSlideIndex: (_i: number) => {},
   });
 
@@ -899,12 +904,20 @@ function TutorPageContent() {
         });
       }
     });
-    socket.on("group:media_pause", (p: { byUserId?: string }) => {
+    socket.on("group:media_pause", (p: { byUserId?: string; userName?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
       groupApplyingRemoteRef.current = true;
       try {
         lessonHandlersRef.current.stopNarration();
         lessonHandlersRef.current.pauseAnswer();
+        setTutorView("qa");
+        setLastQa({
+          question: p.userName
+            ? `${p.userName} is asking a question...`
+            : "Friend is asking a question...",
+          answer: "",
+          askerName: p.userName || "Friend",
+        });
       } finally {
         queueMicrotask(() => {
           groupApplyingRemoteRef.current = false;
@@ -913,18 +926,36 @@ function TutorPageContent() {
     });
     socket.on("group:media_resume_after_question", (p: { byUserId?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
-      if (tutorViewRef.current === "qa") return;
+      setTutorView("lecture");
       if (playingAnswerRef.current) return;
       void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
     socket.on(
       "group:qa",
-      (p: { askerId?: string; askerName?: string; question: string; answer: string }) => {
-        if (p.askerId && p.askerId === myUserIdRef.current) return;
+      (p: {
+        askerId?: string;
+        askerName?: string;
+        question: string;
+        answer: string;
+        questionAudioBase64?: string;
+        questionAudioMimeType?: string;
+      }) => {
         setLastQa({ question: p.question, answer: p.answer, askerName: p.askerName });
         setTutorView("qa");
         const bullets = parseAnswerIntoBullets(p.answer);
-        void lessonHandlersRef.current.playAnswerTts(p.answer, bullets);
+        const onEnded = () => {
+          if (groupSyncRef.current.host) {
+            void resumeLectureAfterAnswer();
+          }
+        };
+        void lessonHandlersRef.current.playAnswerTts(
+          p.answer,
+          bullets,
+          onEnded,
+          p.questionAudioBase64
+            ? { base64: p.questionAudioBase64, mimeType: p.questionAudioMimeType || "audio/webm" }
+            : undefined,
+        );
       },
     );
     socket.on("group:chat_message", (msg: TutorGroupChatMessageDTO) => {
@@ -1448,12 +1479,59 @@ function TutorPageContent() {
 
   async function playAnswerTts(
     text: string,
-    opts?: { onEnded?: () => void; bullets?: string[] },
+    opts?: {
+      onEnded?: () => void;
+      bullets?: string[];
+      questionAudio?: { base64: string; mimeType: string; questionText?: string };
+    },
   ) {
     const tok = getToken();
     if (!tok) return;
     const a = audioRef.current;
     if (!a) return;
+
+    if (opts?.questionAudio) {
+      const { base64, mimeType, questionText } = opts.questionAudio;
+      try {
+        const binary = atob(base64);
+        const array = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          array[i] = binary.charCodeAt(i);
+        }
+        const qBlob = new Blob([array], { type: mimeType });
+        const qUrl = URL.createObjectURL(qBlob);
+
+        clearAudioHandlers();
+        audioRoleRef.current = "answer";
+        setPlayingAnswer(true);
+        setAnswerPaused(false);
+        setAnswerSubtitleLine("Friend asking: " + (questionText || "..."));
+
+        a.src = qUrl;
+
+        const cleanupQuestionPlayback = () => {
+          clearAudioHandlers();
+          URL.revokeObjectURL(qUrl);
+        };
+
+        a.onended = () => {
+          cleanupQuestionPlayback();
+          void playAnswerTts(text, { ...opts, questionAudio: undefined });
+        };
+
+        a.onerror = () => {
+          cleanupQuestionPlayback();
+          void playAnswerTts(text, { ...opts, questionAudio: undefined });
+        };
+
+        await a.play();
+        return;
+      } catch (err) {
+        console.error("Failed playing question audio:", err);
+        void playAnswerTts(text, { ...opts, questionAudio: undefined });
+        return;
+      }
+    }
 
     const answerBullets =
       opts?.bullets && opts.bullets.length > 0 ? opts.bullets : parseAnswerIntoBullets(text);
@@ -1753,12 +1831,17 @@ function TutorPageContent() {
         gid && glive
           ? await apiGroupTutorAsk(t, { groupId: gid, slideIndex: idx, audio: blob })
           : await apiTutorAsk(t, { sessionId: s.id, slideIndex: idx, audio: blob });
-      setLastQa({ question: qa.question, answer: qa.answer });
-      const bullets = parseAnswerIntoBullets(qa.answer);
-      await playAnswerTts(qa.answer, {
-        bullets,
-        onEnded: () => void resumeLectureAfterAnswer(),
-      });
+      if (!gid || !glive) {
+        setLastQa({ question: qa.question, answer: qa.answer });
+        const bullets = parseAnswerIntoBullets(qa.answer);
+        await playAnswerTts(qa.answer, {
+          bullets,
+          onEnded: () => void resumeLectureAfterAnswer(),
+        });
+      } else {
+        // Group study mode: Q&A playback is driven by the broadcasted socket event.
+        // We do not start local playback or setLastQa here.
+      }
     } catch (e) {
       setTutorView("lecture");
       setError(e instanceof Error ? e.message : "Could not process your question.");
@@ -1855,8 +1938,17 @@ function TutorPageContent() {
     playNarration: (i: number) => void playNarration(i),
     stopNarration,
     pauseAnswer: pauseAnswerPlayback,
-    playAnswerTts: (text: string, bullets?: string[]) =>
-      void playAnswerTts(text, bullets?.length ? { bullets } : undefined),
+    playAnswerTts: (
+      text: string,
+      bullets?: string[],
+      onEnded?: () => void,
+      questionAudio?: { base64: string; mimeType: string; questionText?: string },
+    ) =>
+      void playAnswerTts(text, {
+        bullets: bullets?.length ? bullets : undefined,
+        onEnded,
+        questionAudio,
+      }),
     setSlideIndex: (i: number) => setSlideIndex(i),
   };
 
