@@ -14,14 +14,14 @@ function getGeminiApiKey(): string {
  * Run a Gemini call with automatic model fallback.
  *
  * Order:
- * - Primary:  or gemini-2.5-flash
+ * - Primary: GEMINI_MODEL or gemini-2.5-flash
  * - Fallbacks: gemini-2.5-flash-lite, gemini-3.1-flash
  *
  * We only fall back on transient GoogleGenerativeAI fetch errors (503/429).
  */
 async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<T> {
   const apiKey = getGeminiApiKey();
-  const primary = process.env.?.trim() || "gemini-2.5-flash";
+  const primary = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
   const candidates = [primary, "gemini-2.5-flash-lite", "gemini-3.1-flash"].filter(
     (value, index, self) => value && self.indexOf(value) === index,
   );
