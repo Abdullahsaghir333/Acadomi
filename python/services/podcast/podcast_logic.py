@@ -347,7 +347,7 @@ def generate_script_from_gemini(
 
     primary = (gemini_model or "").strip() or os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
     candidates: list[str] = []
-    for name in (primary, "gemini-2.5-flash-lite", "gemini-3.1-flash"):
+    for name in (primary, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"):
         name = name.strip()
         if name and name not in candidates:
             candidates.append(name)
