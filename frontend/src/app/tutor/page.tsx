@@ -1815,6 +1815,7 @@ function TutorPageContent() {
     const chunks = recordChunksRef.current;
     recordChunksRef.current = [];
     const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
+    console.log("Recorded question blob size:", blob.size, "type:", blob.type);
     if (blob.size < 32) {
       setError("Recording too short — tap Record, speak, then tap Stop & send when you are done.");
       emitGroupQuestionAbortedSignal();
@@ -1843,6 +1844,7 @@ function TutorPageContent() {
         // We do not start local playback or setLastQa here.
       }
     } catch (e) {
+      console.error("Failed to ask question:", e);
       setTutorView("lecture");
       setError(e instanceof Error ? e.message : "Could not process your question.");
       emitGroupQuestionAbortedSignal();

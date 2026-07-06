@@ -746,7 +746,8 @@ export async function apiTutorAsk(
 ): Promise<{ question: string; answer: string }> {
   const fd = new FormData();
   fd.append("slideIndex", String(params.slideIndex));
-  fd.append("audio", params.audio, "question.webm");
+  const ext = params.audio.type.split(";")[0].split("/")[1] || "webm";
+  fd.append("audio", params.audio, `question.${ext}`);
   const res = await fetch(`${API_BASE}/api/tutor/sessions/${params.sessionId}/ask`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -919,7 +920,8 @@ export async function apiGroupTutorAsk(
 ): Promise<{ question: string; answer: string }> {
   const fd = new FormData();
   fd.append("slideIndex", String(params.slideIndex));
-  fd.append("audio", params.audio, "question.webm");
+  const ext = params.audio.type.split(";")[0].split("/")[1] || "webm";
+  fd.append("audio", params.audio, `question.${ext}`);
   const res = await fetch(`${API_BASE}/api/tutor/group/${params.groupId}/ask`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },

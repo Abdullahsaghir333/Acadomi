@@ -55,12 +55,13 @@ async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<
 export async function extractTextFromImage(buffer: Buffer, mimeType: string): Promise<string> {
   const prompt =
     "Extract all readable text from this image with maximum accuracy. If text is small, rotated, or low contrast, still try to read it. Return only plain text in English.";
+  const cleanMime = (mimeType || "image/png").split(";")[0].trim();
   const result = await runWithGeminiFallback((model) =>
     model.generateContent([
       { text: prompt },
       {
         inlineData: {
-          mimeType: mimeType || "image/png",
+          mimeType: cleanMime,
           data: buffer.toString("base64"),
         },
       },
@@ -73,12 +74,13 @@ export async function extractTextFromImage(buffer: Buffer, mimeType: string): Pr
 export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
   const prompt =
     "Transcribe this audio with high accuracy. Handle background noise and accents. Return only the clean transcription in English.";
+  const cleanMime = (mimeType || "audio/webm").split(";")[0].trim();
   const result = await runWithGeminiFallback((model) =>
     model.generateContent([
       { text: prompt },
       {
         inlineData: {
-          mimeType: mimeType || "audio/webm",
+          mimeType: cleanMime,
           data: buffer.toString("base64"),
         },
       },
