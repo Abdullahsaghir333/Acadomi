@@ -40,7 +40,7 @@ coverage.xml
 .eggs/
 *.egg
 pip-wheel-metadata/
-
+impurl
 # Jupyter
 .ipynb_checkpoints/
 
