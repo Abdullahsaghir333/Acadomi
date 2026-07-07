@@ -393,6 +393,9 @@ function TutorPageContent() {
   const isGroupHostRef = React.useRef(isGroupHost);
   isGroupHostRef.current = isGroupHost;
   const groupChatScrollRef = React.useRef<HTMLDivElement | null>(null);
+  // Stable ref wrappers so socket event handlers never capture stale closures
+  const refreshGroupDetailRef = React.useRef<() => Promise<void>>(() => Promise.resolve());
+  const resumeLectureAfterAnswerRef = React.useRef<() => Promise<void>>(() => Promise.resolve());
 
   /** Saved playback position per session slide (blob URL key `${id}:${idx}`). */
   const narrationProgressRef = React.useRef<Record<string, number>>({});
@@ -844,14 +847,28 @@ function TutorPageContent() {
       if (group.status === "live") {
         const cur = activeSessionRef.current;
         if (!cur || cur.id !== group.tutorSessionId) {
-          const { session } = await apiGetTutorGroupSession(t, gid);
-          await openSession(session, { groupGuest: !group.isHost });
+          try {
+            const { session } = await apiGetTutorGroupSession(t, gid);
+            await openSession(session, { groupGuest: !group.isHost });
+          } catch (sessionErr) {
+            // If session fetch failed (e.g. DB lag), retry once after 1s
+            console.warn("[group] session fetch failed, retrying in 1s", sessionErr);
+            await new Promise<void>((r) => setTimeout(r, 1000));
+            try {
+              const { session } = await apiGetTutorGroupSession(t, gid);
+              await openSession(session, { groupGuest: !group.isHost });
+            } catch (retryErr) {
+              console.error("[group] session fetch retry also failed", retryErr);
+            }
+          }
         }
       }
-    } catch {
-      /* ignore */
+    } catch (e) {
+      console.warn("[group] refreshGroupDetail failed", e);
     }
   }
+  // Keep ref always pointing to latest version so socket handlers don't use stale closures
+  refreshGroupDetailRef.current = refreshGroupDetail;
 
   async function createGroupWithSelectedFriends() {
     const t = getToken();
@@ -1005,7 +1022,7 @@ function TutorPageContent() {
             // If the session is already live when we join (e.g. page reload or late connect)
             // but we have no tutor session loaded yet, bootstrap it now.
             if (r.status === "live" && !activeSessionRef.current) {
-              void refreshGroupDetail();
+              void refreshGroupDetailRef.current();
             }
           } else {
             console.error("Failed to join group socket room:", r?.error || "Unknown error");
@@ -1079,7 +1096,7 @@ function TutorPageContent() {
         const bullets = parseAnswerIntoBullets(p.answer);
         const onEnded = () => {
           if (groupSyncRef.current.host) {
-            void resumeLectureAfterAnswer();
+            void resumeLectureAfterAnswerRef.current();
           }
         };
         void lessonHandlersRef.current.playAnswerTts(
@@ -1106,7 +1123,7 @@ function TutorPageContent() {
       router.replace("/dashboard");
     });
     socket.on("group:status", () => {
-      void refreshGroupDetail();
+      void refreshGroupDetailRef.current();
     });
     return () => {
       socket.disconnect();
@@ -1601,6 +1618,7 @@ function TutorPageContent() {
     narrationProgressRef.current[saved.key] = saved.time;
     await playNarration(saved.slideIndex);
   }
+  resumeLectureAfterAnswerRef.current = resumeLectureAfterAnswer;
 
   function stopNarration() {
     if (
