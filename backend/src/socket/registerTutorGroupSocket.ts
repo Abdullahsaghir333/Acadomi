@@ -178,6 +178,24 @@ export function registerTutorGroupSocket(io: Server): void {
       })();
     });
 
+    socket.on("group:audio_start", (payload: { groupId?: string; mimeType?: string }) => {
+      const gid = data.groupRoom;
+      if (!gid || gid !== payload?.groupId) return;
+      socket.to(`group:${gid}`).emit("group:audio_start", { mimeType: payload.mimeType });
+    });
+
+    socket.on("group:audio_chunk", (payload: { groupId?: string; audioBase64?: string }) => {
+      const gid = data.groupRoom;
+      if (!gid || gid !== payload?.groupId) return;
+      socket.to(`group:${gid}`).emit("group:audio_chunk", { audioBase64: payload.audioBase64 });
+    });
+
+    socket.on("group:audio_end", (payload: { groupId?: string }) => {
+      const gid = data.groupRoom;
+      if (!gid || gid !== payload?.groupId) return;
+      socket.to(`group:${gid}`).emit("group:audio_end");
+    });
+
     socket.on("disconnect", () => {
       data.groupRoom = undefined;
     });

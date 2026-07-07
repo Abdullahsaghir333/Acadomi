@@ -78,6 +78,81 @@ import {
   type UploadDTO,
 } from "@/lib/api";
 
+class RealtimeAudioPlayer {
+  private mediaSource: MediaSource | null = null;
+  private sourceBuffer: SourceBuffer | null = null;
+  private audio: HTMLAudioElement | null = null;
+  private queue: ArrayBuffer[] = [];
+  private isAppending = false;
+  private mimeType: string;
+
+  constructor(mimeType: string) {
+    this.mimeType = mimeType;
+    if (typeof window === "undefined" || !window.MediaSource) {
+      console.warn("MediaSource is not supported in this browser.");
+      return;
+    }
+    this.audio = new Audio();
+    this.mediaSource = new MediaSource();
+    this.audio.src = URL.createObjectURL(this.mediaSource);
+
+    this.mediaSource.addEventListener("sourceopen", () => {
+      try {
+        let actualMime = this.mimeType;
+        if (!MediaSource.isTypeSupported(actualMime)) {
+          if (actualMime.includes(";")) {
+            actualMime = actualMime.split(";")[0];
+          }
+        }
+        if (!MediaSource.isTypeSupported(actualMime)) {
+          actualMime = "audio/webm";
+        }
+        if (!MediaSource.isTypeSupported(actualMime)) {
+          actualMime = "audio/mpeg";
+        }
+        this.sourceBuffer = this.mediaSource!.addSourceBuffer(actualMime);
+        this.sourceBuffer.addEventListener("updateend", () => {
+          this.isAppending = false;
+          this.processQueue();
+        });
+        this.audio!.play().catch((err) => console.log("Realtime playback autostart error:", err));
+      } catch (e) {
+        console.error("Failed to add source buffer for", this.mimeType, e);
+      }
+    });
+  }
+
+  public feed(chunk: ArrayBuffer) {
+    this.queue.push(chunk);
+    this.processQueue();
+  }
+
+  private processQueue() {
+    if (this.isAppending || !this.sourceBuffer || this.sourceBuffer.updating || this.queue.length === 0) {
+      return;
+    }
+    this.isAppending = true;
+    const chunk = this.queue.shift()!;
+    try {
+      this.sourceBuffer.appendBuffer(chunk);
+    } catch (e) {
+      console.error("Error appending audio chunk to source buffer", e);
+      this.isAppending = false;
+    }
+  }
+
+  public stop() {
+    if (this.audio) {
+      this.audio.pause();
+      this.audio.src = "";
+      this.audio = null;
+    }
+    this.mediaSource = null;
+    this.sourceBuffer = null;
+    this.queue = [];
+  }
+}
+
 function tokenizeScript(script: string): string[] {
   return script.trim().split(/\s+/).filter(Boolean);
 }
@@ -328,6 +403,8 @@ function TutorPageContent() {
   playingAnswerRef.current = playingAnswer;
   const isGroupHostRef = React.useRef(isGroupHost);
   isGroupHostRef.current = isGroupHost;
+  const realtimeAudioPlayerRef = React.useRef<RealtimeAudioPlayer | null>(null);
+  const remoteSyncPlayheadRef = React.useRef<{ currentTime: number; sentAt: number } | null>(null);
   const groupChatScrollRef = React.useRef<HTMLDivElement | null>(null);
 
   /** Saved playback position per session slide (blob URL key `${id}:${idx}`). */
@@ -767,6 +844,7 @@ function TutorPageContent() {
   function emitGroupQuestionAbortedSignal() {
     if (!groupIdRef.current || !groupSyncRef.current.live) return;
     groupSocketRef.current?.emit("group:question_aborted");
+    groupSocketRef.current?.emit("group:audio_end", { groupId: groupIdRef.current });
   }
 
   async function refreshGroupDetail() {
@@ -921,7 +999,12 @@ function TutorPageContent() {
         },
       );
     });
-    socket.on("lesson:follow", (payload: { kind?: string; slideIndex?: number }) => {
+    socket.on("lesson:follow", (payload: {
+      kind?: string;
+      slideIndex?: number;
+      currentTime?: number;
+      sentAt?: number;
+    }) => {
       if (groupSyncRef.current.host) return;
       groupApplyingRemoteRef.current = true;
       try {
@@ -932,8 +1015,28 @@ function TutorPageContent() {
             : slideIndexRef.current;
         if (k === "slide") lessonHandlersRef.current.setSlideIndex(idx);
         if (k === "play") {
+          if (typeof payload.currentTime === "number" && typeof payload.sentAt === "number") {
+            remoteSyncPlayheadRef.current = {
+              currentTime: payload.currentTime,
+              sentAt: payload.sentAt,
+            };
+          }
           lessonHandlersRef.current.setSlideIndex(idx);
-          lessonHandlersRef.current.playNarration(idx);
+          // If already playing this slide, seek to the target time directly
+          const ap = audioRef.current;
+          if (ap && audioRoleRef.current === "slide" && playingSlideRef.current === idx && !ap.paused) {
+            if (remoteSyncPlayheadRef.current) {
+              const targetTime =
+                remoteSyncPlayheadRef.current.currentTime +
+                (Date.now() - remoteSyncPlayheadRef.current.sentAt) / 1000;
+              if (Number.isFinite(targetTime) && Math.abs(ap.currentTime - targetTime) > 0.6) {
+                ap.currentTime = targetTime;
+              }
+              remoteSyncPlayheadRef.current = null;
+            }
+          } else {
+            lessonHandlersRef.current.playNarration(idx);
+          }
         }
         if (k === "pause" || k === "stop") lessonHandlersRef.current.stopNarration();
       } finally {
@@ -968,6 +1071,30 @@ function TutorPageContent() {
       if (playingAnswerRef.current) return;
       void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
+    socket.on("group:audio_start", (p: { mimeType: string }) => {
+      console.log("Realtime audio stream started with mime type:", p.mimeType);
+      realtimeAudioPlayerRef.current?.stop();
+      realtimeAudioPlayerRef.current = new RealtimeAudioPlayer(p.mimeType);
+    });
+    socket.on("group:audio_chunk", (p: { audioBase64: string }) => {
+      if (realtimeAudioPlayerRef.current) {
+        try {
+          const binary = atob(p.audioBase64);
+          const array = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            array[i] = binary.charCodeAt(i);
+          }
+          realtimeAudioPlayerRef.current.feed(array.buffer);
+        } catch (e) {
+          console.error("Failed to decode realtime audio chunk:", e);
+        }
+      }
+    });
+    socket.on("group:audio_end", () => {
+      console.log("Realtime audio stream ended");
+      realtimeAudioPlayerRef.current?.stop();
+      realtimeAudioPlayerRef.current = null;
+    });
     socket.on(
       "group:qa",
       (p: {
@@ -991,13 +1118,7 @@ function TutorPageContent() {
           p.answer,
           bullets,
           onEnded,
-          p.questionAudioBase64
-            ? {
-                base64: p.questionAudioBase64,
-                mimeType: p.questionAudioMimeType || "audio/webm",
-                questionText: p.question,
-              }
-            : undefined,
+          undefined, // Do not replay the question audio again since we heard it live
         );
       },
     );
@@ -1023,6 +1144,8 @@ function TutorPageContent() {
       console.log("Disconnecting group socket for room:", groupId);
       socket.disconnect();
       groupSocketRef.current = null;
+      realtimeAudioPlayerRef.current?.stop();
+      realtimeAudioPlayerRef.current = null;
     };
   }, [groupId, router]);
 
@@ -1387,8 +1510,15 @@ function TutorPageContent() {
 
         const onReady = () => {
           const dur = a.duration;
-          if (saved > 0.2 && Number.isFinite(dur) && dur > 0 && saved < dur - 0.12) {
-            a.currentTime = saved;
+          let targetTime = saved;
+          if (remoteSyncPlayheadRef.current) {
+            targetTime =
+              remoteSyncPlayheadRef.current.currentTime +
+              (Date.now() - remoteSyncPlayheadRef.current.sentAt) / 1000;
+            remoteSyncPlayheadRef.current = null;
+          }
+          if (targetTime > 0.2 && Number.isFinite(dur) && dur > 0 && targetTime < dur - 0.12) {
+            a.currentTime = targetTime;
           }
           attachPlaybackSyncRaf(a, words, setNarrationSubtitleLine, {
             segmentRanges,
@@ -1413,8 +1543,25 @@ function TutorPageContent() {
           }
         });
 
+        let lastSyncTime = 0;
         a.ontimeupdate = () => {
+          const now = Date.now();
           narrationProgressRef.current[audioKey] = a.currentTime;
+          if (
+            groupSyncRef.current.host &&
+            groupSyncRef.current.live &&
+            !groupApplyingRemoteRef.current
+          ) {
+            if (now - lastSyncTime > 1500) {
+              lastSyncTime = now;
+              emitHostLesson({
+                kind: "play",
+                slideIndex: idx,
+                currentTime: a.currentTime,
+                sentAt: now,
+              });
+            }
+          }
         };
         a.onended = () => {
           lectureStepSyncActiveRef.current = false;
@@ -1451,7 +1598,12 @@ function TutorPageContent() {
           groupSyncRef.current.live &&
           !groupApplyingRemoteRef.current
         ) {
-          emitHostLesson({ kind: "play", slideIndex: idx });
+          emitHostLesson({
+            kind: "play",
+            slideIndex: idx,
+            currentTime: a.currentTime,
+            sentAt: Date.now(),
+          });
         }
       }
     } catch (e) {
@@ -1787,10 +1939,40 @@ function TutorPageContent() {
       if (!rec) return false;
       try {
         rec.ondataavailable = (ev) => {
-          if (ev.data.size) recordChunksRef.current.push(ev.data);
+          if (ev.data.size) {
+            recordChunksRef.current.push(ev.data);
+            const gid = groupIdRef.current;
+            const glive = groupSyncRef.current.live;
+            const socket = groupSocketRef.current;
+            if (gid && glive && socket) {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const base64data = reader.result;
+                if (typeof base64data === "string") {
+                  const rawBase64 = base64data.split(",")[1];
+                  socket.emit("group:audio_chunk", {
+                    groupId: gid,
+                    audioBase64: rawBase64,
+                  });
+                }
+              };
+              reader.readAsDataURL(ev.data);
+            }
+          }
         };
         rec.start(200);
         recorderRef.current = rec;
+
+        const gid = groupIdRef.current;
+        const glive = groupSyncRef.current.live;
+        const socket = groupSocketRef.current;
+        if (gid && glive && socket) {
+          socket.emit("group:audio_start", {
+            groupId: gid,
+            mimeType: rec.mimeType,
+          });
+        }
+
         if (fromDedicatedMic) questionMicStreamRef.current = stream;
         setAsking(true);
         return true;
@@ -1843,6 +2025,13 @@ function TutorPageContent() {
     const t = getToken();
     const s = activeSession;
     const idx = slideIndex;
+    const gid = groupIdRef.current;
+    const glive = groupSyncRef.current.live;
+    const socket = groupSocketRef.current;
+    if (gid && glive && socket) {
+      socket.emit("group:audio_end", { groupId: gid });
+    }
+
     await new Promise<void>((resolve) => {
       rec.addEventListener("stop", () => resolve(), { once: true });
       try {
