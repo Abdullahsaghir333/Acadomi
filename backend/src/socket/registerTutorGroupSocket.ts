@@ -45,7 +45,27 @@ export function registerTutorGroupSocket(io: Server): void {
   });
 
   io.on("connection", (socket) => {
-    const data = socket.data as { userId: string; groupRoom?: string };
+    const data = socket.data as {
+      userId: string;
+      groupRoom?: string;
+      isHost?: boolean;
+      hostUserId?: string;
+      userName?: string;
+    };
+
+    // Prefetch userName to completely avoid querying the User model during question start
+    void (async () => {
+      try {
+        const u = await User.findById(data.userId)
+          .select("firstName lastName")
+          .lean<{ firstName?: string; lastName?: string } | null>();
+        if (u) {
+          data.userName = `${u.firstName ?? ""} ${u.lastName ?? ""}`.trim() || "Friend";
+        }
+      } catch (err) {
+        console.error("Error prefetching username for socket:", err);
+      }
+    })();
 
     socket.on("group:join", async (payload: { groupId?: string }, cb) => {
       const groupId = typeof payload?.groupId === "string" ? payload.groupId.trim() : "";
@@ -67,15 +87,17 @@ export function registerTutorGroupSocket(io: Server): void {
           reply({ ok: false, error: "Group not available" });
           return;
         }
-        const uid = new mongoose.Types.ObjectId(data.userId);
-        const isHost = g.hostUserId.equals(uid);
-        const isInvited = g.inviteeUserIds.some((x) => x.equals(uid));
+        const uidStr = data.userId;
+        const isHost = g.hostUserId.toString() === uidStr;
+        const isInvited = g.inviteeUserIds.some((x) => x.toString() === uidStr);
         if (!isHost && !isInvited) {
           reply({ ok: false, error: "Not invited to this group" });
           return;
         }
         await socket.join(`group:${groupId}`);
         data.groupRoom = groupId;
+        data.isHost = isHost;
+        data.hostUserId = g.hostUserId.toString();
         reply({
           ok: true,
           status: g.status,
@@ -89,35 +111,14 @@ export function registerTutorGroupSocket(io: Server): void {
     socket.on("group:question_started", () => {
       const gid = data.groupRoom;
       if (!gid) return;
-      void (async () => {
-        const g = await TutorGroupSession.findById(gid).lean<TutorGroupSessionLean | null>();
-        if (!g || g.status !== "live") return;
-        const uid = new mongoose.Types.ObjectId(data.userId);
-        const isHost = g.hostUserId.equals(uid);
-        const accepted = g.acceptedUserIds.some((x) => x.equals(uid));
-        if (!isHost && !accepted) return;
-        const u = await User.findById(data.userId)
-          .select("firstName lastName")
-          .lean<{ firstName?: string; lastName?: string } | null>();
-        const userName = u
-          ? `${u.firstName ?? ""} ${u.lastName ?? ""}`.trim() || "Friend"
-          : "Friend";
-        io.to(`group:${gid}`).emit("group:media_pause", { byUserId: data.userId, userName });
-      })();
+      const userName = data.userName || "Friend";
+      io.to(`group:${gid}`).emit("group:media_pause", { byUserId: data.userId, userName });
     });
 
     socket.on("group:question_aborted", () => {
       const gid = data.groupRoom;
       if (!gid) return;
-      void (async () => {
-        const g = await TutorGroupSession.findById(gid).lean<TutorGroupSessionLean | null>();
-        if (!g || g.status !== "live") return;
-        const uid = new mongoose.Types.ObjectId(data.userId);
-        const isHost = g.hostUserId.equals(uid);
-        const accepted = g.acceptedUserIds.some((x) => x.equals(uid));
-        if (!isHost && !accepted) return;
-        io.to(`group:${gid}`).emit("group:media_resume_after_question", { byUserId: data.userId });
-      })();
+      io.to(`group:${gid}`).emit("group:media_resume_after_question", { byUserId: data.userId });
     });
 
     socket.on("group:chat_send", async (payload: { text?: string }, cb) => {
@@ -141,9 +142,9 @@ export function registerTutorGroupSocket(io: Server): void {
           reply({ ok: false, error: "Chat is only available during a live session." });
           return;
         }
-        const uid = new mongoose.Types.ObjectId(data.userId);
-        const isHost = g.hostUserId.equals(uid);
-        const accepted = g.acceptedUserIds.some((x) => x.equals(uid));
+        const uidStr = data.userId;
+        const isHost = g.hostUserId.toString() === uidStr;
+        const accepted = g.acceptedUserIds.some((x) => x.toString() === uidStr);
         if (!isHost && !accepted) {
           reply({ ok: false, error: "Not a member." });
           return;
@@ -168,14 +169,8 @@ export function registerTutorGroupSocket(io: Server): void {
 
     socket.on("lesson:host_sync", (payload: unknown) => {
       const gid = data.groupRoom;
-      const userId = data.userId;
-      if (!gid || !userId || payload === null || typeof payload !== "object") return;
-      void (async () => {
-        const g = await TutorGroupSession.findById(gid).lean<TutorGroupSessionLean | null>();
-        if (!g || g.status !== "live") return;
-        if (!g.hostUserId.equals(new mongoose.Types.ObjectId(userId))) return;
-        socket.to(`group:${gid}`).emit("lesson:follow", payload);
-      })();
+      if (!gid || !data.isHost || payload === null || typeof payload !== "object") return;
+      socket.to(`group:${gid}`).emit("lesson:follow", payload);
     });
 
     socket.on("group:audio_start", (payload: { groupId?: string; mimeType?: string }) => {
