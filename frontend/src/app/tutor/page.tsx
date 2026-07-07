@@ -78,74 +78,6 @@ import {
   type UploadDTO,
 } from "@/lib/api";
 
-class RealtimeAudioPlayer {
-  private mediaSource: MediaSource | null = null;
-  private sourceBuffer: SourceBuffer | null = null;
-  private audio: HTMLAudioElement | null = null;
-  private queue: ArrayBuffer[] = [];
-  private isAppending = false;
-  private mimeType: string;
-
-  constructor(mimeType: string) {
-    this.mimeType = mimeType;
-    this.audio = new Audio();
-    this.mediaSource = new MediaSource();
-    this.audio.src = URL.createObjectURL(this.mediaSource);
-
-    this.mediaSource.addEventListener("sourceopen", () => {
-      try {
-        let actualMime = this.mimeType;
-        if (!MediaSource.isTypeSupported(actualMime)) {
-          if (actualMime.includes(";")) {
-            actualMime = actualMime.split(";")[0];
-          }
-        }
-        if (!MediaSource.isTypeSupported(actualMime)) {
-          actualMime = "audio/webm";
-        }
-        this.sourceBuffer = this.mediaSource!.addSourceBuffer(actualMime);
-        this.sourceBuffer.addEventListener("updateend", () => {
-          this.isAppending = false;
-          this.processQueue();
-        });
-        this.audio!.play().catch((err) => console.log("Realtime playback autostart error:", err));
-      } catch (e) {
-        console.error("Failed to add source buffer for", this.mimeType, e);
-      }
-    });
-  }
-
-  public feed(chunk: ArrayBuffer) {
-    this.queue.push(chunk);
-    this.processQueue();
-  }
-
-  private processQueue() {
-    if (this.isAppending || !this.sourceBuffer || this.sourceBuffer.updating || this.queue.length === 0) {
-      return;
-    }
-    this.isAppending = true;
-    const chunk = this.queue.shift()!;
-    try {
-      this.sourceBuffer.appendBuffer(chunk);
-    } catch (e) {
-      console.error("Error appending audio chunk to source buffer", e);
-      this.isAppending = false;
-    }
-  }
-
-  public stop() {
-    if (this.audio) {
-      this.audio.pause();
-      this.audio.src = "";
-      this.audio = null;
-    }
-    this.mediaSource = null;
-    this.sourceBuffer = null;
-    this.queue = [];
-  }
-}
-
 function tokenizeScript(script: string): string[] {
   return script.trim().split(/\s+/).filter(Boolean);
 }
@@ -322,8 +254,6 @@ function TutorPageContent() {
   const [endGroupBusy, setEndGroupBusy] = React.useState(false);
 
   const groupSocketRef = React.useRef<Socket | null>(null);
-  const realtimeAudioPlayerRef = React.useRef<RealtimeAudioPlayer | null>(null);
-  const remoteSyncPlayheadRef = React.useRef<{ currentTime: number; sentAt: number } | null>(null);
   const groupApplyingRemoteRef = React.useRef(false);
   const myUserIdRef = React.useRef<string | null>(null);
   const lessonHandlersRef = React.useRef({
@@ -334,7 +264,7 @@ function TutorPageContent() {
       _t: string,
       _bullets?: string[],
       _onEnded?: () => void,
-      _questionAudio?: { base64: string; mimeType: string },
+      _questionAudio?: { base64: string; mimeType: string; questionText?: string },
     ) => {},
     setSlideIndex: (_i: number) => {},
   });
@@ -352,6 +282,12 @@ function TutorPageContent() {
     !groupDetail.isHost &&
     !groupDetail.youAccepted &&
     groupDetail.status === "gathering";
+
+  const shouldPollGroup =
+    !!groupId &&
+    (!groupDetail ||
+      groupDetail.status === "gathering" ||
+      (groupDetail.status === "live" && !activeSession));
 
   const groupIdRef = React.useRef<string | null>(null);
   const groupSyncRef = React.useRef({ live: false, host: false });
@@ -393,9 +329,6 @@ function TutorPageContent() {
   const isGroupHostRef = React.useRef(isGroupHost);
   isGroupHostRef.current = isGroupHost;
   const groupChatScrollRef = React.useRef<HTMLDivElement | null>(null);
-  // Stable ref wrappers so socket event handlers never capture stale closures
-  const refreshGroupDetailRef = React.useRef<() => Promise<void>>(() => Promise.resolve());
-  const resumeLectureAfterAnswerRef = React.useRef<() => Promise<void>>(() => Promise.resolve());
 
   /** Saved playback position per session slide (blob URL key `${id}:${idx}`). */
   const narrationProgressRef = React.useRef<Record<string, number>>({});
@@ -834,7 +767,6 @@ function TutorPageContent() {
   function emitGroupQuestionAbortedSignal() {
     if (!groupIdRef.current || !groupSyncRef.current.live) return;
     groupSocketRef.current?.emit("group:question_aborted");
-    groupSocketRef.current?.emit("group:audio_end", { groupId: groupIdRef.current });
   }
 
   async function refreshGroupDetail() {
@@ -844,31 +776,41 @@ function TutorPageContent() {
     try {
       const { group } = await apiGetTutorGroup(t, gid);
       setGroupDetail(group);
+
+      if (group.status === "ended" || group.status === "cancelled") {
+        setGroupUrlBootstrapped(false);
+        setGroupId(null);
+        setGroupDetail(null);
+        setError(
+          group.status === "cancelled"
+            ? "This group invite is no longer available."
+            : "This group study session has already ended.",
+        );
+        if (group.status === "ended") {
+          queueDashboardGroupEndedNotice(group.isHost ? "host" : "guest");
+          router.replace("/dashboard");
+        } else {
+          router.replace("/tutor");
+        }
+        return;
+      }
+
       if (group.status === "live") {
         const cur = activeSessionRef.current;
         if (!cur || cur.id !== group.tutorSessionId) {
           try {
             const { session } = await apiGetTutorGroupSession(t, gid);
             await openSession(session, { groupGuest: !group.isHost });
-          } catch (sessionErr) {
-            // If session fetch failed (e.g. DB lag), retry once after 1s
-            console.warn("[group] session fetch failed, retrying in 1s", sessionErr);
-            await new Promise<void>((r) => setTimeout(r, 1000));
-            try {
-              const { session } = await apiGetTutorGroupSession(t, gid);
-              await openSession(session, { groupGuest: !group.isHost });
-            } catch (retryErr) {
-              console.error("[group] session fetch retry also failed", retryErr);
-            }
+          } catch (e) {
+            console.error("Error loading group session:", e);
+            setError("Could not initialize the group study session. Retrying...");
           }
         }
       }
     } catch (e) {
-      console.warn("[group] refreshGroupDetail failed", e);
+      console.error("refreshGroupDetail error:", e);
     }
   }
-  // Keep ref always pointing to latest version so socket handlers don't use stale closures
-  refreshGroupDetailRef.current = refreshGroupDetail;
 
   async function createGroupWithSelectedFriends() {
     const t = getToken();
@@ -944,27 +886,42 @@ function TutorPageContent() {
   }, [searchParams, groupUrlBootstrapped, router]);
 
   React.useEffect(() => {
-    if (!groupId || !isGroupGathering) return;
+    if (!shouldPollGroup) return;
     void refreshGroupDetail();
     const id = window.setInterval(() => void refreshGroupDetail(), 2000);
     return () => window.clearInterval(id);
-  }, [groupId, isGroupGathering]);
+  }, [groupId, shouldPollGroup]);
 
   React.useEffect(() => {
     if (!groupId) return;
     const t = getToken();
     if (!t) return;
+    console.log("Initializing group socket connection for room:", groupId);
     const socket = io(API_BASE, {
       path: "/socket.io/",
       transports: ["websocket", "polling"],
       auth: { token: t },
     });
-    const applyRemoteLessonState = (payload: {
-      kind?: string;
-      slideIndex?: number;
-      currentTime?: number;
-      sentAt?: number;
-    }) => {
+    groupSocketRef.current = socket;
+
+    socket.on("connect_error", (err) => {
+      console.error("Group socket connection error:", err);
+    });
+
+    socket.on("connect", () => {
+      console.log("Group socket connected successfully. Emitting group:join");
+      socket.emit(
+        "group:join",
+        { groupId },
+        (r: { ok?: boolean; chatMessages?: TutorGroupChatMessageDTO[] }) => {
+          console.log("Group socket join acknowledgement received:", r);
+          if (r?.ok && Array.isArray(r.chatMessages)) {
+            setGroupChatMessages(r.chatMessages);
+          }
+        },
+      );
+    });
+    socket.on("lesson:follow", (payload: { kind?: string; slideIndex?: number }) => {
       if (groupSyncRef.current.host) return;
       groupApplyingRemoteRef.current = true;
       try {
@@ -975,28 +932,8 @@ function TutorPageContent() {
             : slideIndexRef.current;
         if (k === "slide") lessonHandlersRef.current.setSlideIndex(idx);
         if (k === "play") {
-          if (typeof payload.currentTime === "number" && typeof payload.sentAt === "number") {
-            remoteSyncPlayheadRef.current = {
-              currentTime: payload.currentTime,
-              sentAt: payload.sentAt,
-            };
-          }
           lessonHandlersRef.current.setSlideIndex(idx);
-          // If already playing this slide, seek to the target time directly
-          const ap = audioRef.current;
-          if (ap && audioRoleRef.current === "slide" && playingSlideRef.current === idx && !ap.paused) {
-            if (remoteSyncPlayheadRef.current) {
-              const targetTime =
-                remoteSyncPlayheadRef.current.currentTime +
-                (Date.now() - remoteSyncPlayheadRef.current.sentAt) / 1000;
-              if (Number.isFinite(targetTime) && Math.abs(ap.currentTime - targetTime) > 0.6) {
-                ap.currentTime = targetTime;
-              }
-              remoteSyncPlayheadRef.current = null;
-            }
-          } else {
-            lessonHandlersRef.current.playNarration(idx);
-          }
+          lessonHandlersRef.current.playNarration(idx);
         }
         if (k === "pause" || k === "stop") lessonHandlersRef.current.stopNarration();
       } finally {
@@ -1004,34 +941,6 @@ function TutorPageContent() {
           groupApplyingRemoteRef.current = false;
         });
       }
-    };
-
-    groupSocketRef.current = socket;
-    socket.on("connect", () => {
-      socket.emit(
-        "group:join",
-        { groupId },
-        (r: { ok?: boolean; error?: string; status?: string; chatMessages?: TutorGroupChatMessageDTO[]; lastSync?: any }) => {
-          if (r?.ok) {
-            if (Array.isArray(r.chatMessages)) {
-              setGroupChatMessages(r.chatMessages);
-            }
-            if (r.lastSync) {
-              applyRemoteLessonState(r.lastSync);
-            }
-            // If the session is already live when we join (e.g. page reload or late connect)
-            // but we have no tutor session loaded yet, bootstrap it now.
-            if (r.status === "live" && !activeSessionRef.current) {
-              void refreshGroupDetailRef.current();
-            }
-          } else {
-            console.error("Failed to join group socket room:", r?.error || "Unknown error");
-          }
-        },
-      );
-    });
-    socket.on("lesson:follow", (payload: { kind?: string; slideIndex?: number }) => {
-      applyRemoteLessonState(payload);
     });
     socket.on("group:media_pause", (p: { byUserId?: string; userName?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
@@ -1059,28 +968,6 @@ function TutorPageContent() {
       if (playingAnswerRef.current) return;
       void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
-    socket.on("group:audio_start", (p: { mimeType: string }) => {
-      realtimeAudioPlayerRef.current?.stop();
-      realtimeAudioPlayerRef.current = new RealtimeAudioPlayer(p.mimeType);
-    });
-    socket.on("group:audio_chunk", (p: { audioBase64: string }) => {
-      if (realtimeAudioPlayerRef.current) {
-        try {
-          const binary = atob(p.audioBase64);
-          const array = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            array[i] = binary.charCodeAt(i);
-          }
-          realtimeAudioPlayerRef.current.feed(array.buffer);
-        } catch (e) {
-          console.error("Failed to decode realtime audio chunk:", e);
-        }
-      }
-    });
-    socket.on("group:audio_end", () => {
-      realtimeAudioPlayerRef.current?.stop();
-      realtimeAudioPlayerRef.current = null;
-    });
     socket.on(
       "group:qa",
       (p: {
@@ -1091,19 +978,26 @@ function TutorPageContent() {
         questionAudioBase64?: string;
         questionAudioMimeType?: string;
       }) => {
+        console.log("Received group:qa broadcast event:", p.question);
         setLastQa({ question: p.question, answer: p.answer, askerName: p.askerName });
         setTutorView("qa");
         const bullets = parseAnswerIntoBullets(p.answer);
         const onEnded = () => {
           if (groupSyncRef.current.host) {
-            void resumeLectureAfterAnswerRef.current();
+            void resumeLectureAfterAnswer();
           }
         };
         void lessonHandlersRef.current.playAnswerTts(
           p.answer,
           bullets,
           onEnded,
-          undefined, // Do not replay the question audio again
+          p.questionAudioBase64
+            ? {
+                base64: p.questionAudioBase64,
+                mimeType: p.questionAudioMimeType || "audio/webm",
+                questionText: p.question,
+              }
+            : undefined,
         );
       },
     );
@@ -1123,13 +1017,12 @@ function TutorPageContent() {
       router.replace("/dashboard");
     });
     socket.on("group:status", () => {
-      void refreshGroupDetailRef.current();
+      void refreshGroupDetail();
     });
     return () => {
+      console.log("Disconnecting group socket for room:", groupId);
       socket.disconnect();
       groupSocketRef.current = null;
-      realtimeAudioPlayerRef.current?.stop();
-      realtimeAudioPlayerRef.current = null;
     };
   }, [groupId, router]);
 
@@ -1494,15 +1387,8 @@ function TutorPageContent() {
 
         const onReady = () => {
           const dur = a.duration;
-          let targetTime = saved;
-          if (remoteSyncPlayheadRef.current) {
-            targetTime =
-              remoteSyncPlayheadRef.current.currentTime +
-              (Date.now() - remoteSyncPlayheadRef.current.sentAt) / 1000;
-            remoteSyncPlayheadRef.current = null;
-          }
-          if (targetTime > 0.2 && Number.isFinite(dur) && dur > 0 && targetTime < dur - 0.12) {
-            a.currentTime = targetTime;
+          if (saved > 0.2 && Number.isFinite(dur) && dur > 0 && saved < dur - 0.12) {
+            a.currentTime = saved;
           }
           attachPlaybackSyncRaf(a, words, setNarrationSubtitleLine, {
             segmentRanges,
@@ -1527,25 +1413,8 @@ function TutorPageContent() {
           }
         });
 
-        let lastSyncTime = 0;
         a.ontimeupdate = () => {
-          const now = Date.now();
           narrationProgressRef.current[audioKey] = a.currentTime;
-          if (
-            groupSyncRef.current.host &&
-            groupSyncRef.current.live &&
-            !groupApplyingRemoteRef.current
-          ) {
-            if (now - lastSyncTime > 1500) {
-              lastSyncTime = now;
-              emitHostLesson({
-                kind: "play",
-                slideIndex: idx,
-                currentTime: a.currentTime,
-                sentAt: now,
-              });
-            }
-          }
         };
         a.onended = () => {
           lectureStepSyncActiveRef.current = false;
@@ -1582,12 +1451,7 @@ function TutorPageContent() {
           groupSyncRef.current.live &&
           !groupApplyingRemoteRef.current
         ) {
-          emitHostLesson({
-            kind: "play",
-            slideIndex: idx,
-            currentTime: a.currentTime,
-            sentAt: Date.now(),
-          });
+          emitHostLesson({ kind: "play", slideIndex: idx });
         }
       }
     } catch (e) {
@@ -1618,7 +1482,6 @@ function TutorPageContent() {
     narrationProgressRef.current[saved.key] = saved.time;
     await playNarration(saved.slideIndex);
   }
-  resumeLectureAfterAnswerRef.current = resumeLectureAfterAnswer;
 
   function stopNarration() {
     if (
@@ -1924,40 +1787,10 @@ function TutorPageContent() {
       if (!rec) return false;
       try {
         rec.ondataavailable = (ev) => {
-          if (ev.data.size) {
-            recordChunksRef.current.push(ev.data);
-            const gid = groupIdRef.current;
-            const glive = groupSyncRef.current.live;
-            const socket = groupSocketRef.current;
-            if (gid && glive && socket) {
-              const reader = new FileReader();
-              reader.onloadend = () => {
-                const base64data = reader.result;
-                if (typeof base64data === "string") {
-                  const rawBase64 = base64data.split(",")[1];
-                  socket.emit("group:audio_chunk", {
-                    groupId: gid,
-                    audioBase64: rawBase64,
-                  });
-                }
-              };
-              reader.readAsDataURL(ev.data);
-            }
-          }
+          if (ev.data.size) recordChunksRef.current.push(ev.data);
         };
         rec.start(200);
         recorderRef.current = rec;
-
-        const gid = groupIdRef.current;
-        const glive = groupSyncRef.current.live;
-        const socket = groupSocketRef.current;
-        if (gid && glive && socket) {
-          socket.emit("group:audio_start", {
-            groupId: gid,
-            mimeType: rec.mimeType,
-          });
-        }
-
         if (fromDedicatedMic) questionMicStreamRef.current = stream;
         setAsking(true);
         return true;
@@ -2010,13 +1843,6 @@ function TutorPageContent() {
     const t = getToken();
     const s = activeSession;
     const idx = slideIndex;
-    const gid = groupIdRef.current;
-    const glive = groupSyncRef.current.live;
-    const socket = groupSocketRef.current;
-    if (gid && glive && socket) {
-      socket.emit("group:audio_end", { groupId: gid });
-    }
-
     await new Promise<void>((resolve) => {
       rec.addEventListener("stop", () => resolve(), { once: true });
       try {
@@ -2150,8 +1976,11 @@ function TutorPageContent() {
   const pendingInviteeCount =
     groupDetail?.inviteeUserIds.filter((uid) => !groupDetail.acceptedUserIds.includes(uid)).length ?? 0;
 
-  const showGroupLobby = !!groupDetail && isGroupGathering && !needsGroupAccept;
-  const showLessonGrid = !!activeSession && (!groupId || !isGroupGathering);
+  const showGroupLobby =
+    !!groupDetail &&
+    (groupDetail.status === "gathering" || !activeSession) &&
+    !needsGroupAccept;
+  const showLessonGrid = !!activeSession && (!groupId || groupDetail?.status === "live");
   const groupControlsLocked = isGroupLive && !isGroupHost;
 
   lessonHandlersRef.current = {

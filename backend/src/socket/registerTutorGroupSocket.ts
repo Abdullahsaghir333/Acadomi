@@ -22,12 +22,6 @@ function verifySocketToken(token: string): string | null {
   }
 }
 
-export const groupLastSyncMap = new Map<string, any>();
-
-export function clearGroupLastSync(groupId: string): void {
-  groupLastSyncMap.delete(groupId);
-}
-
 export function registerTutorGroupSocket(io: Server): void {
   io.use((socket, next) => {
     const raw = socket.handshake.auth as { token?: string } | undefined;
@@ -60,7 +54,6 @@ export function registerTutorGroupSocket(io: Server): void {
         error?: string;
         status?: string;
         chatMessages?: GroupChatMessage[];
-        lastSync?: any;
       }) => {
         if (typeof cb === "function") cb(r);
       };
@@ -83,12 +76,10 @@ export function registerTutorGroupSocket(io: Server): void {
         }
         await socket.join(`group:${groupId}`);
         data.groupRoom = groupId;
-        const lastSync = groupLastSyncMap.get(groupId) || null;
         reply({
           ok: true,
           status: g.status,
           chatMessages: g.status === "live" ? getGroupChatHistory(groupId) : [],
-          lastSync,
         });
       } catch {
         reply({ ok: false, error: "Join failed" });
@@ -183,27 +174,8 @@ export function registerTutorGroupSocket(io: Server): void {
         const g = await TutorGroupSession.findById(gid).lean<TutorGroupSessionLean | null>();
         if (!g || g.status !== "live") return;
         if (!g.hostUserId.equals(new mongoose.Types.ObjectId(userId))) return;
-        groupLastSyncMap.set(gid, payload);
         socket.to(`group:${gid}`).emit("lesson:follow", payload);
       })();
-    });
-
-    socket.on("group:audio_start", (payload: { groupId?: string; mimeType?: string }) => {
-      const gid = data.groupRoom;
-      if (!gid || gid !== payload?.groupId) return;
-      socket.to(`group:${gid}`).emit("group:audio_start", { mimeType: payload.mimeType });
-    });
-
-    socket.on("group:audio_chunk", (payload: { groupId?: string; audioBase64?: string }) => {
-      const gid = data.groupRoom;
-      if (!gid || gid !== payload?.groupId) return;
-      socket.to(`group:${gid}`).emit("group:audio_chunk", { audioBase64: payload.audioBase64 });
-    });
-
-    socket.on("group:audio_end", (payload: { groupId?: string }) => {
-      const gid = data.groupRoom;
-      if (!gid || gid !== payload?.groupId) return;
-      socket.to(`group:${gid}`).emit("group:audio_end");
     });
 
     socket.on("disconnect", () => {
