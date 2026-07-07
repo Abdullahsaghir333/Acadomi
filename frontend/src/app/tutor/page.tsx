@@ -871,19 +871,7 @@ function TutorPageContent() {
       transports: ["websocket", "polling"],
       auth: { token: t },
     });
-    groupSocketRef.current = socket;
-    socket.on("connect", () => {
-      socket.emit(
-        "group:join",
-        { groupId },
-        (r: { ok?: boolean; chatMessages?: TutorGroupChatMessageDTO[] }) => {
-          if (r?.ok && Array.isArray(r.chatMessages)) {
-            setGroupChatMessages(r.chatMessages);
-          }
-        },
-      );
-    });
-    socket.on("lesson:follow", (payload: { kind?: string; slideIndex?: number }) => {
+    const applyRemoteLessonState = (payload: { kind?: string; slideIndex?: number }) => {
       if (groupSyncRef.current.host) return;
       groupApplyingRemoteRef.current = true;
       try {
@@ -903,6 +891,29 @@ function TutorPageContent() {
           groupApplyingRemoteRef.current = false;
         });
       }
+    };
+
+    groupSocketRef.current = socket;
+    socket.on("connect", () => {
+      socket.emit(
+        "group:join",
+        { groupId },
+        (r: { ok?: boolean; error?: string; chatMessages?: TutorGroupChatMessageDTO[]; lastSync?: any }) => {
+          if (r?.ok) {
+            if (Array.isArray(r.chatMessages)) {
+              setGroupChatMessages(r.chatMessages);
+            }
+            if (r.lastSync) {
+              applyRemoteLessonState(r.lastSync);
+            }
+          } else {
+            console.error("Failed to join group socket room:", r?.error || "Unknown error");
+          }
+        },
+      );
+    });
+    socket.on("lesson:follow", (payload: { kind?: string; slideIndex?: number }) => {
+      applyRemoteLessonState(payload);
     });
     socket.on("group:media_pause", (p: { byUserId?: string; userName?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;

@@ -22,6 +22,12 @@ function verifySocketToken(token: string): string | null {
   }
 }
 
+export const groupLastSyncMap = new Map<string, any>();
+
+export function clearGroupLastSync(groupId: string): void {
+  groupLastSyncMap.delete(groupId);
+}
+
 export function registerTutorGroupSocket(io: Server): void {
   io.use((socket, next) => {
     const raw = socket.handshake.auth as { token?: string } | undefined;
@@ -54,6 +60,7 @@ export function registerTutorGroupSocket(io: Server): void {
         error?: string;
         status?: string;
         chatMessages?: GroupChatMessage[];
+        lastSync?: any;
       }) => {
         if (typeof cb === "function") cb(r);
       };
@@ -76,10 +83,12 @@ export function registerTutorGroupSocket(io: Server): void {
         }
         await socket.join(`group:${groupId}`);
         data.groupRoom = groupId;
+        const lastSync = groupLastSyncMap.get(groupId) || null;
         reply({
           ok: true,
           status: g.status,
           chatMessages: g.status === "live" ? getGroupChatHistory(groupId) : [],
+          lastSync,
         });
       } catch {
         reply({ ok: false, error: "Join failed" });
@@ -174,6 +183,7 @@ export function registerTutorGroupSocket(io: Server): void {
         const g = await TutorGroupSession.findById(gid).lean<TutorGroupSessionLean | null>();
         if (!g || g.status !== "live") return;
         if (!g.hostUserId.equals(new mongoose.Types.ObjectId(userId))) return;
+        groupLastSyncMap.set(gid, payload);
         socket.to(`group:${gid}`).emit("lesson:follow", payload);
       })();
     });

@@ -9,6 +9,7 @@ import { Upload, type UploadDoc } from "../models/Upload.js";
 import { User } from "../models/User.js";
 import { authMiddleware, type AuthedRequest } from "../middleware/auth.js";
 import { clearGroupChat } from "../socket/groupChatStore.js";
+import { clearGroupLastSync } from "../socket/registerTutorGroupSocket.js";
 import { getSocketIo } from "../socket/socketRegistry.js";
 import { answerTutorQuestion, transcribeAudio } from "../services/gemini.js";
 import { tutorPyTts } from "../services/tutorPythonClient.js";
@@ -356,6 +357,7 @@ router.post("/:id/decline", authMiddleware, async (req: AuthedRequest, res: Resp
       },
     );
     clearGroupChat(id);
+    clearGroupLastSync(id);
     emitGroupStatus(id, { status: "cancelled" });
     return res.json({ ok: true });
   } catch (e) {
@@ -381,6 +383,7 @@ router.post("/:id/end", authMiddleware, async (req: AuthedRequest, res: Response
     }
     await TutorGroupSession.updateOne({ _id: id }, { $set: { status: "ended" } });
     clearGroupChat(id);
+    clearGroupLastSync(id);
     getSocketIo()?.to(`group:${id}`).emit("group:ended", { groupId: id });
     return res.json({ ok: true });
   } catch (e) {
