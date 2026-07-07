@@ -879,6 +879,13 @@ function TutorPageContent() {
           try {
             const { session } = await apiGetTutorGroupSession(t, gid);
             await openSession(session, { groupGuest: !group.isHost });
+            // Emit group:join when transitioning to live or initializing the session,
+            // to fetch the chat history and ensure the socket has joined the room.
+            groupSocketRef.current?.emit("group:join", { groupId: gid }, (r: any) => {
+              if (r?.ok && Array.isArray(r.chatMessages)) {
+                setGroupChatMessages(r.chatMessages);
+              }
+            });
           } catch (e) {
             console.error("Error loading group session:", e);
             setError("Could not initialize the group study session. Retrying...");
@@ -1147,7 +1154,7 @@ function TutorPageContent() {
       realtimeAudioPlayerRef.current?.stop();
       realtimeAudioPlayerRef.current = null;
     };
-  }, [groupId, router]);
+  }, [groupId, router, authUser]);
 
   React.useEffect(() => {
     if (!groupDetail || groupDetail.status !== "ended") return;
