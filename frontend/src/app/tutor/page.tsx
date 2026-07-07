@@ -934,7 +934,7 @@ function TutorPageContent() {
   }, [groupId, isGroupGathering]);
 
   React.useEffect(() => {
-    if (!groupId || !isGroupLive) return;
+    if (!groupId) return;
     const t = getToken();
     if (!t) return;
     const socket = io(API_BASE, {
@@ -994,13 +994,18 @@ function TutorPageContent() {
       socket.emit(
         "group:join",
         { groupId },
-        (r: { ok?: boolean; error?: string; chatMessages?: TutorGroupChatMessageDTO[]; lastSync?: any }) => {
+        (r: { ok?: boolean; error?: string; status?: string; chatMessages?: TutorGroupChatMessageDTO[]; lastSync?: any }) => {
           if (r?.ok) {
             if (Array.isArray(r.chatMessages)) {
               setGroupChatMessages(r.chatMessages);
             }
             if (r.lastSync) {
               applyRemoteLessonState(r.lastSync);
+            }
+            // If the session is already live when we join (e.g. page reload or late connect)
+            // but we have no tutor session loaded yet, bootstrap it now.
+            if (r.status === "live" && !activeSessionRef.current) {
+              void refreshGroupDetail();
             }
           } else {
             console.error("Failed to join group socket room:", r?.error || "Unknown error");
@@ -1035,7 +1040,7 @@ function TutorPageContent() {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
       setTutorView("lecture");
       if (playingAnswerRef.current) return;
-       void lessonHandlersRef.current.playNarration(slideIndexRef.current);
+      void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
     socket.on("group:audio_start", (p: { mimeType: string }) => {
       realtimeAudioPlayerRef.current?.stop();
@@ -1109,7 +1114,7 @@ function TutorPageContent() {
       realtimeAudioPlayerRef.current?.stop();
       realtimeAudioPlayerRef.current = null;
     };
-  }, [groupId, isGroupLive, router]);
+  }, [groupId, router]);
 
   React.useEffect(() => {
     if (!groupDetail || groupDetail.status !== "ended") return;
