@@ -1111,7 +1111,8 @@ function TutorPageContent() {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
       // Clear the global question lock so narration can resume
       groupQuestionActiveRef.current = false;
-      lessonHandlersRef.current.pauseAnswer();
+      // NOTE: Do NOT call pauseAnswer() here — the answer TTS may still be playing
+      // on this device. Let it finish naturally; only switch the view.
       setTutorView("lecture");
       // Guests re-request sync so the host re-broadcasts the current slide/playback position
       if (!groupSyncRef.current.host) {
@@ -2254,6 +2255,7 @@ function TutorPageContent() {
   const groupControlsLocked = isGroupLive && !isGroupHost;
   const showBackToSlides =
     !isGroupLive ||
+    isGroupHost ||
     (lastQa?.askerId === authUser?.id) ||
     (!lastQa && (asking || questionSubmitting));
 
@@ -2731,6 +2733,9 @@ function TutorPageContent() {
                             pauseAnswerPlayback();
                             setAnswerBulletIndex(null);
                             setTutorView("lecture");
+                            // Clear local question lock immediately so this user
+                            // can receive lesson:follow play events from the host
+                            groupQuestionActiveRef.current = false;
                             if (isGroupLive && groupSocketRef.current) {
                               groupSocketRef.current.emit("group:request_resume");
                             }
@@ -2806,6 +2811,9 @@ function TutorPageContent() {
                                   pauseAnswerPlayback();
                                   setAnswerBulletIndex(null);
                                   setTutorView("lecture");
+                                  // Clear local question lock immediately so this user
+                                  // can receive lesson:follow play events from the host
+                                  groupQuestionActiveRef.current = false;
                                   if (isGroupLive && groupSocketRef.current) {
                                     groupSocketRef.current.emit("group:request_resume");
                                   }
