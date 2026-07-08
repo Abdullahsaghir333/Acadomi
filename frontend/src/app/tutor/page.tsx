@@ -885,6 +885,10 @@ function TutorPageContent() {
               if (r?.ok && Array.isArray(r.chatMessages)) {
                 setGroupChatMessages(r.chatMessages);
               }
+              if (!groupSyncRef.current.host) {
+                console.log("Guest requesting sync on live transition");
+                groupSocketRef.current?.emit("lesson:request_sync");
+              }
             });
           } catch (e) {
             console.error("Error loading group session:", e);
@@ -1003,8 +1007,25 @@ function TutorPageContent() {
           if (r?.ok && Array.isArray(r.chatMessages)) {
             setGroupChatMessages(r.chatMessages);
           }
+          if (!groupSyncRef.current.host) {
+            console.log("Guest requesting sync after connect join");
+            socket.emit("lesson:request_sync");
+          }
         },
       );
+    });
+    socket.on("lesson:request_sync", () => {
+      if (!groupSyncRef.current.host) return;
+      console.log("Host received lesson:request_sync, broadcasting current state");
+      const idx = slideIndexRef.current;
+      const ap = audioRef.current;
+      const isPlaying = ap && audioRoleRef.current === "slide" && !ap.paused;
+      emitHostLesson({
+        kind: isPlaying ? "play" : "pause",
+        slideIndex: idx,
+        currentTime: ap ? ap.currentTime : 0,
+        sentAt: Date.now(),
+      });
     });
     socket.on("lesson:follow", (payload: {
       kind?: string;
@@ -1020,7 +1041,9 @@ function TutorPageContent() {
           typeof payload?.slideIndex === "number"
             ? payload.slideIndex
             : slideIndexRef.current;
-        if (k === "slide") lessonHandlersRef.current.setSlideIndex(idx);
+        if (typeof payload?.slideIndex === "number") {
+          lessonHandlersRef.current.setSlideIndex(idx);
+        }
         if (k === "play") {
           if (typeof payload.currentTime === "number" && typeof payload.sentAt === "number") {
             remoteSyncPlayheadRef.current = {
@@ -1028,7 +1051,6 @@ function TutorPageContent() {
               sentAt: payload.sentAt,
             };
           }
-          lessonHandlersRef.current.setSlideIndex(idx);
           // If already playing this slide, seek to the target time directly
           const ap = audioRef.current;
           if (ap && audioRoleRef.current === "slide" && playingSlideRef.current === idx && !ap.paused) {

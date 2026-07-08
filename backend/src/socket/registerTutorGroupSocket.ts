@@ -90,7 +90,8 @@ export function registerTutorGroupSocket(io: Server): void {
         const uidStr = data.userId;
         const isHost = g.hostUserId.toString() === uidStr;
         const isInvited = g.inviteeUserIds.some((x) => x.toString() === uidStr);
-        if (!isHost && !isInvited) {
+        const isAccepted = g.acceptedUserIds.some((x) => x.toString() === uidStr);
+        if (!isHost && !isInvited && !isAccepted) {
           reply({ ok: false, error: "Not invited to this group" });
           return;
         }
@@ -171,6 +172,12 @@ export function registerTutorGroupSocket(io: Server): void {
       const gid = data.groupRoom;
       if (!gid || !data.isHost || payload === null || typeof payload !== "object") return;
       socket.to(`group:${gid}`).emit("lesson:follow", payload);
+    });
+
+    socket.on("lesson:request_sync", () => {
+      const gid = data.groupRoom;
+      if (!gid) return;
+      socket.to(`group:${gid}`).emit("lesson:request_sync");
     });
 
     socket.on("group:audio_start", (payload: { groupId?: string; mimeType?: string }) => {
