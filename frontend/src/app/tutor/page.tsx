@@ -402,6 +402,10 @@ function TutorPageContent() {
   tutorViewRef.current = tutorView;
   const playingAnswerRef = React.useRef(playingAnswer);
   playingAnswerRef.current = playingAnswer;
+  const askingRef = React.useRef(asking);
+  askingRef.current = asking;
+  const questionSubmittingRef = React.useRef(questionSubmitting);
+  questionSubmittingRef.current = questionSubmitting;
   const isGroupHostRef = React.useRef(isGroupHost);
   isGroupHostRef.current = isGroupHost;
   const realtimeAudioPlayerRef = React.useRef<RealtimeAudioPlayer | null>(null);
@@ -1035,6 +1039,7 @@ function TutorPageContent() {
       sentAt?: number;
     }) => {
       if (groupSyncRef.current.host) return;
+      if (askingRef.current || questionSubmittingRef.current) return;
       groupApplyingRemoteRef.current = true;
       try {
         const k = payload?.kind;
@@ -1100,7 +1105,6 @@ function TutorPageContent() {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
       lessonHandlersRef.current.pauseAnswer();
       setTutorView("lecture");
-      void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
     socket.on("group:audio_start", (p: { mimeType: string }) => {
       console.log("Realtime audio stream started with mime type:", p.mimeType);
