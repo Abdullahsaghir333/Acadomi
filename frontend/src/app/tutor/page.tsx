@@ -366,13 +366,9 @@ function TutorPageContent() {
       (groupDetail.status === "live" && !activeSession));
 
   const groupIdRef = React.useRef<string | null>(null);
+  groupIdRef.current = groupId;
   const groupSyncRef = React.useRef({ live: false, host: false });
-  React.useEffect(() => {
-    groupIdRef.current = groupId;
-  }, [groupId]);
-  React.useEffect(() => {
-    groupSyncRef.current = { live: !!isGroupLive, host: !!isGroupHost };
-  }, [isGroupLive, isGroupHost]);
+  groupSyncRef.current = { live: !!isGroupLive, host: !!isGroupHost };
 
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
@@ -761,8 +757,8 @@ function TutorPageContent() {
     const want = [slideIndex, slideIndex + 1, slideIndex - 1].filter((i) => i >= 0 && i < n);
     let cancelled = false;
     void (async () => {
-      const gid = groupIdRef.current;
-      const live = groupSyncRef.current.live;
+      const gid = groupId;
+      const live = isGroupLive;
       for (const i of want) {
         if (cancelled) break;
         const key = `${s.id}:${i}`;
@@ -1971,6 +1967,7 @@ function TutorPageContent() {
     setError(null);
     askingRef.current = true;
     haltAllMediaForQuestion();
+    emitGroupQuestionStartedSignal();
     setLastQa(null);
     recordChunksRef.current = [];
     stopQuestionMicStream();
@@ -2025,7 +2022,6 @@ function TutorPageContent() {
     const combined = streamRef.current;
     if (combined?.getAudioTracks().length) {
       if (attachAndStart(combined, false)) {
-        emitGroupQuestionStartedSignal();
         return;
       }
     }
@@ -2040,7 +2036,6 @@ function TutorPageContent() {
         video: false,
       });
       if (attachAndStart(audioOnly, true)) {
-        emitGroupQuestionStartedSignal();
         return;
       }
       audioOnly.getTracks().forEach((tr) => tr.stop());
@@ -2051,11 +2046,13 @@ function TutorPageContent() {
           : "We could not use the microphone. Allow mic access for this site, turn the camera on first, or try another browser.",
       );
       askingRef.current = false;
+      emitGroupQuestionAbortedSignal();
       return;
     }
 
     setError("Recording could not start. Try another browser or refresh the page.");
     askingRef.current = false;
+    emitGroupQuestionAbortedSignal();
   }
 
   async function finishQuestionRecording() {
