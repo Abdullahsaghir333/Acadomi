@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 
 import { ConceptBookmark, bookmarkLineFingerprint, type ConceptBookmarkLean } from "../models/ConceptBookmark.js";
 import { Upload, type UploadDoc } from "../models/Upload.js";
+import { TutorGroupSession } from "../models/TutorGroupSession.js";
 import { authMiddleware, type AuthedRequest } from "../middleware/auth.js";
 import {
   answerBookmarkQuestion,
@@ -50,7 +51,6 @@ router.get("/materials", authMiddleware, async (req: AuthedRequest, res: Respons
     const uploadIds = groups.map((g) => g._id);
     const uploads = await Upload.find({
       _id: { $in: uploadIds },
-      userId: req.userId,
     })
       .select("_id title kind status")
       .lean<Pick<UploadDoc, "_id" | "title" | "kind" | "status">[]>();
@@ -86,7 +86,6 @@ router.get("/", authMiddleware, async (req: AuthedRequest, res: Response) => {
   try {
     const upload = await Upload.findOne({
       _id: uploadId,
-      userId: req.userId,
       status: "completed",
     }).lean();
     if (!upload) {
@@ -139,11 +138,29 @@ router.post("/", authMiddleware, async (req: AuthedRequest, res: Response) => {
   try {
     const upload = await Upload.findOne({
       _id: sourceUploadId,
-      userId: req.userId,
       status: "completed",
     });
     if (!upload) {
       return res.status(404).json({ error: "Upload not found or not completed." });
+    }
+
+    let hasAccess = upload.userId.toString() === req.userId;
+    if (!hasAccess && tutorSessionId) {
+      const group = await TutorGroupSession.findOne({
+        tutorSessionId,
+        $or: [
+          { hostUserId: req.userId },
+          { inviteeUserIds: req.userId },
+          { acceptedUserIds: req.userId },
+        ],
+      }).lean();
+      if (group) {
+        hasAccess = true;
+      }
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({ error: "Access denied to this material." });
     }
 
     const total = await ConceptBookmark.countDocuments({ userId: req.userId });
@@ -211,7 +228,7 @@ router.post("/:id/recap/tts", authMiddleware, async (req: AuthedRequest, res: Re
       if (!process.env.GEMINI_API_KEY) {
         return res.status(500).json({ error: "GEMINI_API_KEY is not configured on the server." });
       }
-      const uploadDoc = await Upload.findOne({ _id: b.sourceUploadId, userId: req.userId }).lean<UploadDoc | null>();
+      const uploadDoc = await Upload.findOne({ _id: b.sourceUploadId }).lean<UploadDoc | null>();
       const material =
         uploadDoc != null
           ? [uploadDoc.processedContent, uploadDoc.extractedText].filter(Boolean).join("\n\n").trim()
@@ -281,7 +298,7 @@ router.post("/:id/chat", authMiddleware, async (req: AuthedRequest, res: Respons
       return res.status(404).json({ error: "Bookmark not found." });
     }
 
-    const uploadDoc = await Upload.findOne({ _id: b.sourceUploadId, userId: req.userId }).lean<UploadDoc | null>();
+    const uploadDoc = await Upload.findOne({ _id: b.sourceUploadId }).lean<UploadDoc | null>();
     const material =
       uploadDoc != null
         ? [uploadDoc.processedContent, uploadDoc.extractedText].filter(Boolean).join("\n\n").trim()

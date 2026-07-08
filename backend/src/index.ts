@@ -84,6 +84,21 @@ async function start() {
     try {
       await mongoose.connect(MONGODB_URI);
       console.log("MongoDB connected");
+
+      // Auto-migrate: drop the old conflicting unique index on { sourceUploadId, lineFingerprint } if it exists in DB
+      try {
+        const collection = mongoose.connection.collection("conceptbookmarks");
+        const indexes = await collection.indexes();
+        for (const idx of indexes) {
+          if (idx.unique && idx.name && idx.key && !idx.key.userId && idx.key.sourceUploadId && idx.key.lineFingerprint) {
+            console.log("Dropping old unique index:", idx.name);
+            await collection.dropIndex(idx.name);
+          }
+        }
+      } catch (indexErr) {
+        console.error("Error checking/dropping old concept bookmark indexes:", indexErr);
+      }
+
     } catch (err) {
       console.error("MongoDB connection failed:", err);
     }
