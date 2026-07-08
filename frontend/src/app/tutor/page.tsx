@@ -332,6 +332,9 @@ function TutorPageContent() {
   const groupSocketRef = React.useRef<Socket | null>(null);
   const groupApplyingRemoteRef = React.useRef(false);
   const myUserIdRef = React.useRef<string | null>(null);
+  myUserIdRef.current = authUser?.id ?? null;
+  /** True while any group member (self or remote) is asking a question. Blocks all narration. */
+  const groupQuestionActiveRef = React.useRef(false);
   const lessonHandlersRef = React.useRef({
     playNarration: (_i: number) => {},
     stopNarration: () => {},
@@ -344,10 +347,6 @@ function TutorPageContent() {
     ) => {},
     setSlideIndex: (_i: number) => {},
   });
-
-  React.useEffect(() => {
-    myUserIdRef.current = authUser?.id ?? null;
-  }, [authUser?.id]);
 
   const isGroupGathering = groupDetail?.status === "gathering";
   const isGroupLive = groupDetail?.status === "live";
@@ -802,6 +801,12 @@ function TutorPageContent() {
 
   async function openSession(s: TutorSessionDTO, opts?: { groupGuest?: boolean }) {
     stopNarration();
+    // Reset all Q&A recording state so a fresh session always starts clean
+    askingRef.current = false;
+    setAsking(false);
+    questionSubmittingRef.current = false;
+    setQuestionSubmitting(false);
+    groupQuestionActiveRef.current = false;
     setError(null);
     setTutorView("lecture");
     setNarrationBulletIndex(null);
@@ -1035,7 +1040,7 @@ function TutorPageContent() {
       sentAt?: number;
     }) => {
       if (groupSyncRef.current.host) return;
-      if (askingRef.current || questionSubmittingRef.current) return;
+      if (askingRef.current || questionSubmittingRef.current || groupQuestionActiveRef.current) return;
       groupApplyingRemoteRef.current = true;
       try {
         const k = payload?.kind;
@@ -1077,7 +1082,12 @@ function TutorPageContent() {
       }
     });
     socket.on("group:media_pause", (p: { byUserId?: string; userName?: string }) => {
-      if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
+      if (!p?.byUserId) return;
+      // Mark that a question is globally active — blocks ALL narration including the host's
+      groupQuestionActiveRef.current = true;
+      // If the asker receives their own pause event, skip the UI update (their state
+      // is already managed locally), but keep the groupQuestionActiveRef flag set.
+      if (p.byUserId === myUserIdRef.current) return;
       groupApplyingRemoteRef.current = true;
       try {
         lessonHandlersRef.current.stopNarration();
@@ -1099,8 +1109,14 @@ function TutorPageContent() {
     });
     socket.on("group:media_resume_after_question", (p: { byUserId?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
+      // Clear the global question lock so narration can resume
+      groupQuestionActiveRef.current = false;
       lessonHandlersRef.current.pauseAnswer();
       setTutorView("lecture");
+      // Guests re-request sync so the host re-broadcasts the current slide/playback position
+      if (!groupSyncRef.current.host) {
+        groupSocketRef.current?.emit("lesson:request_sync");
+      }
     });
     socket.on("group:audio_start", (p: { mimeType: string }) => {
       console.log("Realtime audio stream started with mime type:", p.mimeType);
@@ -1660,6 +1676,8 @@ function TutorPageContent() {
   }
 
   async function resumeLectureAfterAnswer() {
+    // Clear the global question lock on the asker's device
+    groupQuestionActiveRef.current = false;
     setTutorView("lecture");
     setAnswerBulletIndex(null);
     const saved = lectureResumeRef.current;
@@ -1668,7 +1686,10 @@ function TutorPageContent() {
     if (slideIndexRef.current !== saved.slideIndex) return;
     if (!narrationUrlsRef.current[saved.key]) return;
     narrationProgressRef.current[saved.key] = saved.time;
-    await playNarration(saved.slideIndex);
+    // Only auto-resume playback if no other group question is still pending
+    if (!groupQuestionActiveRef.current) {
+      await playNarration(saved.slideIndex);
+    }
   }
 
   function stopNarration() {
@@ -1966,6 +1987,7 @@ function TutorPageContent() {
     if (asking) return;
     setError(null);
     askingRef.current = true;
+    groupQuestionActiveRef.current = true;
     haltAllMediaForQuestion();
     emitGroupQuestionStartedSignal();
     setLastQa(null);
