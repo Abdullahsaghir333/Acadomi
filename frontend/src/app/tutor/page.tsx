@@ -291,6 +291,7 @@ function TutorPageContent() {
     question: string;
     answer: string;
     askerName?: string;
+    askerId?: string;
   } | null>(null);
   const [answerAudioUrl, setAnswerAudioUrl] = React.useState<string | null>(null);
   const [autoAdvanceNarration, setAutoAdvanceNarration] = React.useState(true);
@@ -1087,6 +1088,7 @@ function TutorPageContent() {
             : "Friend is asking a question...",
           answer: "",
           askerName: p.userName || "Friend",
+          askerId: p.byUserId,
         });
       } finally {
         queueMicrotask(() => {
@@ -1096,8 +1098,8 @@ function TutorPageContent() {
     });
     socket.on("group:media_resume_after_question", (p: { byUserId?: string }) => {
       if (!p?.byUserId || p.byUserId === myUserIdRef.current) return;
+      lessonHandlersRef.current.pauseAnswer();
       setTutorView("lecture");
-      if (playingAnswerRef.current) return;
       void lessonHandlersRef.current.playNarration(slideIndexRef.current);
     });
     socket.on("group:audio_start", (p: { mimeType: string }) => {
@@ -1135,7 +1137,12 @@ function TutorPageContent() {
         questionAudioMimeType?: string;
       }) => {
         console.log("Received group:qa broadcast event:", p.question);
-        setLastQa({ question: p.question, answer: p.answer, askerName: p.askerName });
+        setLastQa({
+          question: p.question,
+          answer: p.answer,
+          askerName: p.askerName,
+          askerId: p.askerId,
+        });
         setTutorView("qa");
         const bullets = parseAnswerIntoBullets(p.answer);
         const onEnded = () => {
@@ -2087,6 +2094,14 @@ function TutorPageContent() {
     setError(null);
     setQuestionSubmitting(true);
     setTutorView("qa");
+    if (gid && glive) {
+      setLastQa({
+        question: "Transcribing your question...",
+        answer: "",
+        askerName: "You",
+        askerId: authUser?.id ?? undefined,
+      });
+    }
     try {
       const gid = groupIdRef.current;
       const glive = groupSyncRef.current.live;
@@ -2108,6 +2123,7 @@ function TutorPageContent() {
     } catch (e) {
       console.error("Failed to ask question:", e);
       setTutorView("lecture");
+      setLastQa(null);
       setError(e instanceof Error ? e.message : "Could not process your question.");
       emitGroupQuestionAbortedSignal();
       void resumeLectureAfterAnswer();
@@ -2200,6 +2216,10 @@ function TutorPageContent() {
     !needsGroupAccept;
   const showLessonGrid = !!activeSession && (!groupId || groupDetail?.status === "live");
   const groupControlsLocked = isGroupLive && !isGroupHost;
+  const showBackToSlides =
+    !isGroupLive ||
+    (lastQa?.askerId === authUser?.id) ||
+    (!lastQa && (asking || questionSubmitting));
 
   lessonHandlersRef.current = {
     playNarration: (i: number) => void playNarration(i),
@@ -2666,7 +2686,7 @@ function TutorPageContent() {
                             </Button>
                           ) : null}
                         </>
-                      ) : (
+                      ) : showBackToSlides ? (
                         <Button
                           type="button"
                           variant="outline"
@@ -2675,11 +2695,14 @@ function TutorPageContent() {
                             pauseAnswerPlayback();
                             setAnswerBulletIndex(null);
                             setTutorView("lecture");
+                            if (isGroupLive && groupSocketRef.current) {
+                              groupSocketRef.current.emit("group:request_resume");
+                            }
                           }}
                         >
                           Back to slides
                         </Button>
-                      )}
+                      ) : null}
                       <Button
                         type="button"
                         variant="secondary"
@@ -2738,18 +2761,23 @@ function TutorPageContent() {
                         </CardTitle>
                         <div className="flex flex-wrap items-center gap-2">
                           {tutorView === "qa" ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                pauseAnswerPlayback();
-                                setAnswerBulletIndex(null);
-                                setTutorView("lecture");
-                              }}
-                            >
-                              Back to slides
-                            </Button>
+                            showBackToSlides && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  pauseAnswerPlayback();
+                                  setAnswerBulletIndex(null);
+                                  setTutorView("lecture");
+                                  if (isGroupLive && groupSocketRef.current) {
+                                    groupSocketRef.current.emit("group:request_resume");
+                                  }
+                                }}
+                              >
+                                Back to slides
+                              </Button>
+                            )
                           ) : (
                             <span className="text-xs text-muted-foreground">
                               {activeSession.topicFocus ? `Focus: ${activeSession.topicFocus}` : "Full material"}

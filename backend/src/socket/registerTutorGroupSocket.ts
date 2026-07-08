@@ -122,6 +122,12 @@ export function registerTutorGroupSocket(io: Server): void {
       io.to(`group:${gid}`).emit("group:media_resume_after_question", { byUserId: data.userId });
     });
 
+    socket.on("group:request_resume", () => {
+      const gid = data.groupRoom;
+      if (!gid) return;
+      io.to(`group:${gid}`).emit("group:media_resume_after_question", { byUserId: data.userId });
+    });
+
     socket.on("group:chat_send", async (payload: { text?: string }, cb) => {
       const reply = (r: Record<string, unknown>) => {
         if (typeof cb === "function") cb(r);
