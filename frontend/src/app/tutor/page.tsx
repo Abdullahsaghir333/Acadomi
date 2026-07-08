@@ -1969,6 +1969,7 @@ function TutorPageContent() {
     }
     if (asking) return;
     setError(null);
+    askingRef.current = true;
     haltAllMediaForQuestion();
     setLastQa(null);
     recordChunksRef.current = [];
@@ -2049,16 +2050,19 @@ function TutorPageContent() {
           ? "We could not use the microphone. Allow mic access for this site or try another browser."
           : "We could not use the microphone. Allow mic access for this site, turn the camera on first, or try another browser.",
       );
+      askingRef.current = false;
       return;
     }
 
     setError("Recording could not start. Try another browser or refresh the page.");
+    askingRef.current = false;
   }
 
   async function finishQuestionRecording() {
     const rec = recorderRef.current;
     if (!rec || rec.state === "inactive") {
       setAsking(false);
+      askingRef.current = false;
       stopQuestionMicStream();
       return;
     }
@@ -2081,6 +2085,7 @@ function TutorPageContent() {
       }
     });
     setAsking(false);
+    askingRef.current = false;
     recorderRef.current = null;
     stopQuestionMicStream();
     if (!t || !s) return;
@@ -2097,6 +2102,7 @@ function TutorPageContent() {
     }
     setError(null);
     setQuestionSubmitting(true);
+    questionSubmittingRef.current = true;
     setTutorView("qa");
     if (gid && glive) {
       setLastQa({
@@ -2133,6 +2139,7 @@ function TutorPageContent() {
       void resumeLectureAfterAnswer();
     } finally {
       setQuestionSubmitting(false);
+      questionSubmittingRef.current = false;
     }
   }
 
