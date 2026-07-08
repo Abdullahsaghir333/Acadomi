@@ -1676,20 +1676,26 @@ function TutorPageContent() {
   }
 
   async function resumeLectureAfterAnswer() {
-    // Clear the global question lock on the asker's device
+    // Clear the global question lock on the host's device immediately
     groupQuestionActiveRef.current = false;
     setTutorView("lecture");
     setAnswerBulletIndex(null);
+
+    // *** KEY FIX ***
+    // Broadcast to every other group member that the question is over.
+    // This MUST happen before any early return so guests always receive the signal
+    // and clear their own groupQuestionActiveRef, unblocking lesson:follow play events.
+    if (groupSyncRef.current.host && groupSyncRef.current.live) {
+      groupSocketRef.current?.emit("group:request_resume");
+    }
+
     const saved = lectureResumeRef.current;
     lectureResumeRef.current = null;
     if (!saved) return;
     if (slideIndexRef.current !== saved.slideIndex) return;
     if (!narrationUrlsRef.current[saved.key]) return;
     narrationProgressRef.current[saved.key] = saved.time;
-    // Only auto-resume playback if no other group question is still pending
-    if (!groupQuestionActiveRef.current) {
-      await playNarration(saved.slideIndex);
-    }
+    await playNarration(saved.slideIndex);
   }
 
   function stopNarration() {
