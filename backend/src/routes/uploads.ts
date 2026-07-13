@@ -50,8 +50,8 @@ router.post(
   authMiddleware,
   upload.array("files"),
   async (req: AuthedRequest, res: Response) => {
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({ error: "GEMINI_API_KEY is not configured on the server." });
+    if (!process.env.GEMINI_API_KEY && !process.env.GROQ_API && !process.env.GROQ_API_KEY) {
+      return res.status(500).json({ error: "Neither GEMINI_API_KEY nor GROQ_API keys are configured on the server." });
     }
 
     const files = req.files as Express.Multer.File[] | undefined;

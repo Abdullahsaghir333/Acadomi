@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import Groq from "groq-sdk";
+import Groq, { toFile } from "groq-sdk";
 
 type GeminiModelInvoker<T> = (model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>) => Promise<T>;
 
@@ -59,7 +59,7 @@ async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<
 }
 
 async function runTextLlm(prompt: string): Promise<string> {
-  const groqApiKey = process.env.GROQ_API?.trim();
+  const groqApiKey = (process.env.GROQ_API || process.env.GROQ_API_KEY)?.trim();
   if (groqApiKey) {
     try {
       const groq = new Groq({ apiKey: groqApiKey });
@@ -72,8 +72,10 @@ async function runTextLlm(prompt: string): Promise<string> {
         return text.trim();
       }
     } catch (err) {
-      console.error("Groq text completion failed, falling back to Gemini:", err);
+      console.error("Groq text completion failed, falling back to Gemini. Error details:", err);
     }
+  } else {
+    console.warn("Neither GROQ_API nor GROQ_API_KEY environment variables are configured.");
   }
 
   // Fallback to Gemini
@@ -82,8 +84,8 @@ async function runTextLlm(prompt: string): Promise<string> {
 }
 
 async function runImageExtractionGroq(buffer: Buffer, mimeType: string): Promise<string> {
-  const apiKey = process.env.GROQ_API?.trim();
-  if (!apiKey) throw new Error("GROQ_API not configured");
+  const apiKey = (process.env.GROQ_API || process.env.GROQ_API_KEY)?.trim();
+  if (!apiKey) throw new Error("GROQ_API or GROQ_API_KEY not configured");
 
   const groq = new Groq({ apiKey });
   const cleanMime = (mimeType || "image/png").split(";")[0].trim();
@@ -114,11 +116,11 @@ async function runImageExtractionGroq(buffer: Buffer, mimeType: string): Promise
 }
 
 async function runAudioTranscriptionGroq(buffer: Buffer, mimeType: string): Promise<string> {
-  const apiKey = process.env.GROQ_API?.trim();
-  if (!apiKey) throw new Error("GROQ_API not configured");
+  const apiKey = (process.env.GROQ_API || process.env.GROQ_API_KEY)?.trim();
+  if (!apiKey) throw new Error("GROQ_API or GROQ_API_KEY not configured");
 
   const groq = new Groq({ apiKey });
-  const file = new (globalThis as any).File([buffer], "audio.webm", { type: mimeType || "audio/webm" });
+  const file = await toFile(buffer, "audio.webm", { type: mimeType || "audio/webm" });
   const transcription = await groq.audio.transcriptions.create({
     file: file,
     model: "whisper-large-v3",
