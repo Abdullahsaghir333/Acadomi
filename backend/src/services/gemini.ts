@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
 type GeminiModelInvoker<T> = (model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>) => Promise<T>;
 
@@ -15,16 +16,21 @@ function getGeminiApiKey(): string {
  *
  * Order:
  * - Primary: GEMINI_MODEL or gemini-2.5-flash
- * - Fallbacks: gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro
+ * - Fallbacks: gemini-2.5-flash-lite, gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-flash
  *
  * We only fall back on transient GoogleGenerativeAI fetch errors (503/429).
  */
 async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<T> {
   const apiKey = getGeminiApiKey();
   const primary = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
-  const candidates = [primary, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"].filter(
-    (value, index, self) => value && self.indexOf(value) === index,
-  );
+  const candidates = [
+    primary,
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+  ].filter((value, index, self) => value && self.indexOf(value) === index);
 
   const genAI = new GoogleGenerativeAI(apiKey);
   let lastError: unknown;
@@ -52,7 +58,85 @@ async function runWithGeminiFallback<T>(invoke: GeminiModelInvoker<T>): Promise<
   throw lastError ?? new Error("All Gemini models failed for this request.");
 }
 
+async function runTextLlm(prompt: string): Promise<string> {
+  const groqApiKey = process.env.GROQ_API?.trim();
+  if (groqApiKey) {
+    try {
+      const groq = new Groq({ apiKey: groqApiKey });
+      const response = await groq.chat.completions.create({
+        messages: [{ role: "user", content: prompt }],
+        model: "llama-3.3-70b-versatile",
+      });
+      const text = response.choices[0]?.message?.content;
+      if (text && text.trim()) {
+        return text.trim();
+      }
+    } catch (err) {
+      console.error("Groq text completion failed, falling back to Gemini:", err);
+    }
+  }
+
+  // Fallback to Gemini
+  const result = await runWithGeminiFallback((model) => model.generateContent(prompt));
+  return result.response.text().trim();
+}
+
+async function runImageExtractionGroq(buffer: Buffer, mimeType: string): Promise<string> {
+  const apiKey = process.env.GROQ_API?.trim();
+  if (!apiKey) throw new Error("GROQ_API not configured");
+
+  const groq = new Groq({ apiKey });
+  const cleanMime = (mimeType || "image/png").split(";")[0].trim();
+  const base64Data = buffer.toString("base64");
+  const dataUrl = `data:${cleanMime};base64,${base64Data}`;
+
+  const response = await groq.chat.completions.create({
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Extract all readable text from this image with maximum accuracy. If text is small, rotated, or low contrast, still try to read it. Return only plain text in English.",
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: dataUrl,
+            },
+          },
+        ],
+      },
+    ],
+    model: "llama-3.2-11b-vision-preview",
+  });
+  return response.choices[0]?.message?.content || "";
+}
+
+async function runAudioTranscriptionGroq(buffer: Buffer, mimeType: string): Promise<string> {
+  const apiKey = process.env.GROQ_API?.trim();
+  if (!apiKey) throw new Error("GROQ_API not configured");
+
+  const groq = new Groq({ apiKey });
+  const file = new (globalThis as any).File([buffer], "audio.webm", { type: mimeType || "audio/webm" });
+  const transcription = await groq.audio.transcriptions.create({
+    file: file,
+    model: "whisper-large-v3",
+    language: "en",
+  });
+  return transcription.text;
+}
+
 export async function extractTextFromImage(buffer: Buffer, mimeType: string): Promise<string> {
+  try {
+    const text = await runImageExtractionGroq(buffer, mimeType);
+    if (text && text.trim()) {
+      return text.trim();
+    }
+  } catch (err) {
+    console.error("Groq image extraction failed, falling back to Gemini:", err);
+  }
+
   const prompt =
     "Extract all readable text from this image with maximum accuracy. If text is small, rotated, or low contrast, still try to read it. Return only plain text in English.";
   const cleanMime = (mimeType || "image/png").split(";")[0].trim();
@@ -72,6 +156,15 @@ export async function extractTextFromImage(buffer: Buffer, mimeType: string): Pr
 }
 
 export async function transcribeAudio(buffer: Buffer, mimeType: string): Promise<string> {
+  try {
+    const text = await runAudioTranscriptionGroq(buffer, mimeType);
+    if (text && text.trim()) {
+      return text.trim();
+    }
+  } catch (err) {
+    console.error("Groq audio transcription failed, falling back to Gemini:", err);
+  }
+
   const prompt =
     "Transcribe this audio with high accuracy. Handle background noise and accents. Return only the clean transcription in English.";
   const cleanMime = (mimeType || "audio/webm").split(";")[0].trim();
@@ -114,8 +207,7 @@ Produce a clear, professional response in markdown with:
 
 Keep tone academic but approachable. If the source is empty or unusable, say so briefly.`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  return result.response.text().trim();
+  return runTextLlm(body);
 }
 
 export type RoleReversalVisualHints = {
@@ -287,8 +379,7 @@ ${student}
 
 Be fair: reward correct ideas; note gaps vs reference. JSON only:`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(prompt));
-  const rawText = result.response.text().trim();
+  const rawText = await runTextLlm(prompt);
   let parsed: unknown;
   try {
     parsed = extractFirstJsonObject(rawText);
@@ -359,8 +450,7 @@ Rules:
 - Bullets are concise; the script expands and teaches them.
 - Stay faithful to the material; do not invent facts not supported by the text.`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  const rawText = result.response.text().trim();
+  const rawText = await runTextLlm(body);
   let parsed: unknown;
   try {
     parsed = extractFirstJsonObject(rawText);
@@ -399,8 +489,7 @@ ${params.materialExcerpt.trim().slice(0, 24_000)}
 
 Student question: ${q}`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  return result.response.text().trim();
+  return runTextLlm(body);
 }
 
 /**
@@ -429,8 +518,8 @@ Reference material (for accuracy only):
 ${params.materialExcerpt.trim().slice(0, 14_000)}
 ---`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  return result.response.text().trim().slice(0, 6000);
+  const rawText = await runTextLlm(body);
+  return rawText.slice(0, 6000);
 }
 
 function stripOuterMarkdownFence(text: string): string {
@@ -472,8 +561,7 @@ Strict output rules (follow all):
 
 Output **only** valid Markdown for the cheat sheet. No preamble, no closing commentary, no code fences wrapping the whole document.`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  const raw = result.response.text().trim();
+  const raw = await runTextLlm(body);
   return stripOuterMarkdownFence(raw).trim().slice(0, 120_000);
 }
 
@@ -501,8 +589,8 @@ Write a **short audio recap** they can listen to (about 55–130 words). Rules:
 
 Output ONLY the spoken script, nothing else.`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  return result.response.text().trim().slice(0, 4000);
+  const rawText = await runTextLlm(body);
+  return rawText.slice(0, 4000);
 }
 
 export type BookmarkChatTurn = { role: "user" | "assistant"; content: string };
@@ -536,6 +624,6 @@ ${params.message.trim().slice(0, 4000)}
 
 Reply with a clear, helpful answer (markdown allowed for formulas/code if needed). Stay grounded in the material; if the question goes beyond it, say what you can infer and what is unknown. Keep it focused — roughly 80–350 words unless they ask for depth.`;
 
-  const result = await runWithGeminiFallback((model) => model.generateContent(body));
-  return result.response.text().trim().slice(0, 12_000);
+  const rawText = await runTextLlm(body);
+  return rawText.slice(0, 12_000);
 }
