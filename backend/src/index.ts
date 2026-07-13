@@ -63,8 +63,8 @@ app.use("/api/bookmarks", bookmarkRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/podcasts", podcastRoutes);
 app.use("/api/role-reversal", roleReversalRoutes);
-app.use("/api/tutor", tutorRoutes);
 app.use("/api/tutor/group", tutorGroupRoutes);
+app.use("/api/tutor", tutorRoutes);
 app.use("/api/cheat-sheets", cheatSheetRoutes);
 app.use("/api/friends", friendRoutes);
 
