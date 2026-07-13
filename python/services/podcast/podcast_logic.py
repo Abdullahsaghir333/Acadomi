@@ -337,21 +337,39 @@ def _parse_dialogue_json_array(raw: str) -> list[Any]:
     raise ValueError("Gemini did not return a usable JSON array of dialogue turns.")
 
 
+def generate_script_from_groq(prompt: str, api_key: str) -> str:
+    import urllib.request
+    import json
+    
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST"
+    )
+    
+    with urllib.request.urlopen(req, timeout=45) as response:
+        res_data = json.loads(response.read().decode("utf-8"))
+        return res_data["choices"][0]["message"]["content"]
+
+
 def generate_script_from_gemini(
     source_text: str,
     *,
     gemini_api_key: str | None = None,
     gemini_model: str | None = None,
 ) -> list[dict[str, str]]:
-    _configure_gemini_key(gemini_api_key)
-
-    primary = (gemini_model or "").strip() or os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
-    candidates: list[str] = []
-    for name in (primary, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"):
-        name = name.strip()
-        if name and name not in candidates:
-            candidates.append(name)
-
     text = source_text.strip()
     if len(text) > 120_000:
         text = text[:120_000] + "\n\n[truncated for model context]"
@@ -380,6 +398,42 @@ MATERIAL:
 
 Your entire reply must be only the JSON array, nothing else:"""
 
+    # 1. Try Groq first
+    groq_api_key = (os.environ.get("GROQ_API") or os.environ.get("GROQ_API_KEY") or "").strip()
+    if groq_api_key:
+        try:
+            print("Attempting podcast script generation via Groq...")
+            raw = generate_script_from_groq(prompt, groq_api_key)
+            data = _parse_dialogue_json_array(raw)
+            lines: list[dict[str, str]] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                sp = str(item.get("speaker", "")).strip()
+                tx = str(item.get("text", "")).strip()
+                if sp not in (SPEAKER_FEMALE, SPEAKER_MALE) or not tx:
+                    continue
+                lines.append({"speaker": sp, "text": tx})
+            if len(lines) >= 2:
+                print("Podcast script successfully generated via Groq!")
+                return lines
+            else:
+                print("Groq generated less than 2 lines. Falling back to Gemini...")
+        except Exception as err:
+            print(f"Groq podcast script generation failed: {err}. Falling back to Gemini...")
+    else:
+        print("No GROQ_API or GROQ_API_KEY environment variable configured for podcast service.")
+
+    # 2. Fallback to Gemini
+    _configure_gemini_key(gemini_api_key)
+
+    primary = (gemini_model or "").strip() or os.environ.get("GEMINI_MODEL", "").strip() or "gemini-2.5-flash"
+    candidates: list[str] = []
+    for name in (primary, "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash"):
+        name = name.strip()
+        if name and name not in candidates:
+            candidates.append(name)
+
     last_error: Exception | None = None
     response = None
     for model_name in candidates:
@@ -389,8 +443,8 @@ Your entire reply must be only the JSON array, nothing else:"""
             break
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
-            # Fallback only on transient/service errors (e.g. 503, 429, resource exhausted).
-            transient = "503" in msg or "Service Unavailable" in msg or "RESOURCE_EXHAUSTED" in msg or "429" in msg
+            # Fallback only on transient/service/not found errors (e.g. 503, 429, resource exhausted, 404).
+            transient = "503" in msg or "Service Unavailable" in msg or "RESOURCE_EXHAUSTED" in msg or "429" in msg or "404" in msg or "not found" in msg.lower()
             if not transient:
                 raise
             last_error = exc
