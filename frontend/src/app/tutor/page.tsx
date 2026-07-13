@@ -1074,6 +1074,8 @@ function TutorPageContent() {
             lessonHandlersRef.current.playNarration(idx);
           }
         }
+        // host navigated to a different slide without playing — stop guest's current narration
+        if (k === "slide") lessonHandlersRef.current.stopNarration();
         if (k === "pause" || k === "stop") lessonHandlersRef.current.stopNarration();
       } finally {
         queueMicrotask(() => {
@@ -1605,7 +1607,7 @@ function TutorPageContent() {
             groupSyncRef.current.live &&
             !groupApplyingRemoteRef.current
           ) {
-            if (now - lastSyncTime > 1500) {
+            if (now - lastSyncTime > 500) {
               lastSyncTime = now;
               emitHostLesson({
                 kind: "play",
@@ -1616,6 +1618,17 @@ function TutorPageContent() {
             }
           }
         };
+        // Broadcast pause/stop events to guests so they mirror the host's state
+        a.onpause = () => {
+          if (
+            groupSyncRef.current.host &&
+            groupSyncRef.current.live &&
+            !groupApplyingRemoteRef.current &&
+            !a.ended
+          ) {
+            emitHostLesson({ kind: "pause", slideIndex: idx, currentTime: a.currentTime, sentAt: Date.now() });
+          }
+        };
         a.onended = () => {
           lectureStepSyncActiveRef.current = false;
           clearAudioHandlers();
@@ -1624,11 +1637,16 @@ function TutorPageContent() {
           setNarrationSubtitleLine("");
           setNarrationBulletIndex(null);
           narrationProgressRef.current[audioKey] = 0;
+          // Guests in a group session must NOT auto-advance independently —
+          // they always follow the host's lesson:follow events.
+          if (groupSyncRef.current.live && !groupSyncRef.current.host) return;
           if (!autoAdvanceRef.current) return;
           const sess = activeSessionRef.current;
           if (!sess) return;
           const next = idx + 1;
           if (next < sess.slides.length) {
+            // Tell guests to switch slides BEFORE playing so they prefetch and follow cleanly
+            emitHostLesson({ kind: "slide", slideIndex: next });
             setSlideIndex(next);
             void playNarration(next);
           }
